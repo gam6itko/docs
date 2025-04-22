@@ -1,18 +1,18 @@
 # Container — IoC Scopes
 
-Building long-lasting applications requires proper management of context. In many systems, you can no longer treat user requests as global singletons stored across services.
+Building long-lasting applications requires proper management of context.
+In demonized applications, you can no longer treat user requests as global singletons stored across services.
 
 This means you need to explicitly request context when processing user input.
-Spiral provides an easy way to manage this using an IoC (Inversion of Control) container scopes.
+Spiral provides an elegant way to manage this using IoC (Inversion of Control) container scopes.
 
 Scopes allow you to create isolated contexts where you can redefine services and manage their lifecycle.
 
-## How to Create an Isolated Scope
+## Creating Isolated Scopes
 
-To create an isolated context, use the `Container::runScope()` method. The first argument is a `Scope` object that contains all the scope options, and the second is a function that will run inside this scope.
+To create an isolated context, use the `Container::runScope()` method.
+The first argument is a `Scope` object that contains scope options, and the second is a function that will run inside this scope.
 The result of this function is returned by `runScope()`.
-
-For example, you can redefine custom bindings to the scope by passing them in the `Scope` object:
 
 ```php
 $result = $container->runScope(
@@ -35,12 +35,12 @@ When you call `$container->runScope(new Scope(...), fn() => ...)`, a new contain
 The new container will be used inside the provided function and will be destroyed after the function completes.
 
 Important points:
-- Visibility: parent containers don’t know about their child containers. However, services in the parent container are accessible within children.
-- Scopes can be named or anonymous.
-    - The main global scope is always `root`.
-    - Named scopes must have unique names in a hierarchy to avoid conflicts.  
-      ![scopes-conflict](https://gist.github.com/user-attachments/assets/32f1ae89-9e35-4e7a-9e53-b3db15fee0ea)
-    - Parallel scopes with the same name (like in coroutines) can exist and will have their own hierarchies.
+- **Visibility**: Parent containers don't know about their child containers. However, services in the parent container are accessible within children.
+- **Scope Naming**:
+  - The main global scope is always `root`.
+  - Named scopes must have unique names in a hierarchy to avoid conflicts.  
+    ![scopes-conflict](https://gist.github.com/user-attachments/assets/32f1ae89-9e35-4e7a-9e53-b3db15fee0ea)
+  - Parallel scopes with the same name (like in coroutines) can exist and will have their own hierarchies.
 - When exiting a scope, the associated container is destroyed.
 
 ### Dependency Resolution Order
@@ -53,14 +53,14 @@ When resolving dependencies inside an isolated scope:
 
 ## Predefined Scopes
 
-There are several predefined scopes in Spiral:
+Spiral provides several predefined scopes:
 
 ![spiral-scopes](https://gist.github.com/user-attachments/assets/aa12be0a-bea1-439c-a676-ef8d6158bda9)
 
-1. `root` — the main global scope. All other scopes are its children.
-2. Dispatcher Scope — a scope that opens when the corresponding [Dispatcher](../framework/dispatcher.md) is started:
+1. `root` — The main global scope. All other scopes are its children.
+2. **Dispatcher Scope** — A scope that opens when the corresponding [Dispatcher](../framework/dispatcher.md) is started:
    `http`, `console`, `grpc`, `centrifugo`, `tcp`, `queue`, or `temporal`.
-3. Request Scope — a scope that opens before the controller is executed, when the request object is fully formed and ready for processing.
+3. **Request Scope** — A scope that opens before the controller is executed, when the request object is fully formed and ready for processing.
    In the case of the HTTP dispatcher, middleware will be executed in the `http` scope, and interceptors in `http-request`.
 
 If you are sure that a service will only work within a specific dispatcher, it makes sense to use the corresponding scope.
@@ -75,8 +75,6 @@ You can create your own scopes to isolate context and make only specific service
 You can preconfigure bindings specific to named scopes using the `BinderInterface::getBinder()` method.
 This allows you to set default bindings for a scope.
 
-Example:
-
 ```php
 $container->bindSingleton(Interface::class, Implementation::class);
 
@@ -86,15 +84,13 @@ $binder->bindSingleton(Interface::class, Implementation::class);
 $binder->bind(Interface::class, factory(...));
 ```
 
-> Note:
+> **Note**
 > Bindings in a scope do not affect existing containers of that scope (except for `root`).
 
 
 ## Overriding Default Bindings
 
 When using `Container::runScope()`, you can pass bindings to override defaults for a specific scope.
-
-Example:
 
 ```php
 $container->bindSingleton(SomeInterface::class, SomeImplementation::class);
@@ -117,8 +113,6 @@ Here, even if the `request` scope has a default binding for `SomeInterface`, thi
 
 You can restrict where a dependency can be resolved using the `#[Scope('name')]` attribute.
 
-Example:
-
 ```php
 use Spiral\Boot\Environment\DebugMode;
 use Spiral\Core\Attribute\Scope;
@@ -135,7 +129,7 @@ final readonly class DebugMiddleware implements \Psr\Http\Server\MiddlewareInter
 }
 ```
 
-Here, the `DebugMiddleware` can be instantiated only if the `http` scope exists in the scope hierarchy.
+In this example, `DebugMiddleware` can be instantiated only if the `http` scope exists in the scope hierarchy.
 Otherwise, an exception is thrown.
 
 
@@ -171,7 +165,7 @@ that will handle `ServerRequestInterface` objects in the `http-request` scope?
 With nested containers, this is impossible because `ServerRequestInterface` is only available inside the `http-request` scope.
 Moreover, `ServerRequestInterface` will be different for each request.
 
-Spiral provides proxy objects that defer dependency resolution until it’s actually needed.
+Spiral provides proxy objects that defer dependency resolution until it's actually needed.
 
 Use the `#[Proxy]` attribute to create proxies for interfaces:
 

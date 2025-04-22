@@ -2,7 +2,7 @@ $schema: 'https://raw.githubusercontent.com/context-hub/generator/refs/heads/mai
 documents:
   -
     description: 'EN manifest'
-    outputPath: project-structure.md
+    outputPath: en-structure.md
     overwrite: true
     sources:
       - type: tree
@@ -15,6 +15,21 @@ documents:
       - type: file
         sourcePaths:
           - docs/en/manifest.json
+  -
+    description: 'CN manifest'
+    outputPath: cn-structure.md
+    overwrite: true
+    sources:
+      - type: tree
+        sourcePaths:
+          - docs/zh-CN
+        filePattern: '*'
+        renderFormat: ascii
+        enabled: true
+        showCharCount: true
+      - type: file
+        sourcePaths:
+          - docs/zh-CN/manifest.json
   -
     description: 'Guidelines'
     outputPath: guidelines.md

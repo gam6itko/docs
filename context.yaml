@@ -1,0 +1,32 @@
+$schema: 'https://raw.githubusercontent.com/context-hub/generator/refs/heads/main/json-schema.json'
+documents:
+  -
+    description: 'EN manifest'
+    outputPath: project-structure.md
+    overwrite: true
+    sources:
+      - type: tree
+        sourcePaths:
+          - docs/en
+        filePattern: '*'
+        renderFormat: ascii
+        enabled: true
+        showCharCount: true
+      - type: file
+        sourcePaths:
+          - docs/en/manifest.json
+  -
+    description: 'Guidelines'
+    outputPath: guidelines.md
+    overwrite: true
+    sources:
+      - type: text
+        tag: instruction
+        content: |
+          There are all the guidelines about how to do any things in the project placed in the `resources/guidelines` folder.
+          Always read all the related guidelines to make the work more efficient.
+      - type: tree
+        sourcePaths:
+          - resources/guidelines
+        filePattern: '*.md'
+        renderFormat: ascii

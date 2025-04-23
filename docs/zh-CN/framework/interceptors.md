@@ -2,13 +2,13 @@
 
 Spiral 的关键特性之一是其对拦截器的支持，拦截器可用于为应用程序添加功能，而无需修改应用程序的核心代码。这有助于保持你的代码库更加模块化和可维护。
 
-**使用拦截器的一些好处如下：**
+**使用拦截器的好处：**
 
-- **关注点分离：** 使用拦截器可以让你将应用程序的不同部分分离并组织起来。例如，你可以使用拦截器来处理身份验证，而无需将该代码添加到需要身份验证的应用程序的每个单独部分。这使得理解和维护你的代码变得更加容易。
-- **可重用性：** 通过拦截器，你可以编写一次代码并在应用程序的多个部分中使用它。这意味着你不必一遍又一遍地编写相同的代码，从而节省时间并降低出错的可能性。
+- **关注点分离：** 使用拦截器可以让你将应用程序的不同部分分离并组织起来。例如，你可以使用拦截器来处理身份验证，而无需将该代码添加到需要身份验证的应用程序的每个单独部分。
+- **可重用性：** 通过拦截器，你可以编写一次代码并在应用程序的多个部分中使用它，减少代码重复。
 - **模块化：** 在不影响应用程序其余部分的情况下添加、删除或替换拦截器的能力使其更灵活且易于更新。
-- **性能：** 拦截器可用于通过缓存响应、减少数据库查询次数等方式优化应用程序的性能。这意味着你的应用程序会更快，并且在大量用户同时访问时不太可能变慢。
-- **易用性：** 将拦截器添加到你的应用程序相对容易和直接，使其对所有技能水平的开发人员都可用。
+- **性能：** 拦截器可用于通过缓存响应、减少数据库查询次数等方式优化应用程序的性能。
+- **易用性：** 将拦截器添加到你的应用程序相对容易和直接。
 
 你可以将拦截器与各种组件一起使用，例如：
 
@@ -17,198 +17,451 @@ Spiral 的关键特性之一是其对拦截器的支持，拦截器可用于为�
 - [gRPC](../grpc/interceptors.md)
 - [Websocket](../websockets/interceptors.md)
 - [队列](../queue/interceptors.md)
+- [Temporal](../temporal/interceptors.md)
 
-> **注意**
-> 域核心需要 `spiral/hmvc` 组件。Web 包默认包含此包。
+## 拦截器接口
 
-## 域核心
+拦截器实现 `Spiral\Interceptors\InterceptorInterface` 接口：
 
-为了使用拦截器，你需要有一个核心类，该类负责运行可以在调用之前或之后被拦截的特定逻辑。
+```php
+namespace Spiral\Interceptors;
 
-例如，假设你有一个数据库层，你需要记录数据库查询、测量查询时间以及记录慢查询。
+use Spiral\Interceptors\Context\CallContextInterface;
 
-为了实现这一点，你可以创建一个 `DatabaseQueryCore` 类，该类实现 `Spiral\Core\CoreInterface`。这个类将负责运行数据库查询并返回查询结果。
-
-```php app/src/Integration/Database/DatabaseQueryCore.php
-namespace App\Integration\Database;
-
-use Spiral\Core\CoreInterface;
-use Cycle\Database\DatabaseManager;
-use Cycle\Database\StatementInterface;
-
-final class DatabaseQueryCore implements CoreInterface
+interface InterceptorInterface
 {
-    public function __construct(
-        private readonly DatabaseManager $manager
-    ) {
-    }
-
-    public function callAction(string $database, string $sql, array $parameters = []): StatementInterface
-    {
-        $sqlParameters = $parameters['sql_parameters'] ?? [];
-        \assert(\is_array($sqlParameters));
-
-        $database = $this->manager->database($database);
-        return $database->query(
-            $sql,
-            $sqlParameters
-        );
-    }
+    public function intercept(CallContextInterface $context, HandlerInterface $handler): mixed;
 }
 ```
 
-然后你可以使用 `Spiral\Core\InterceptableCore` 类，该类允许你注册拦截器，并在你处理核心类时调用它们。
+该接口提供了一种灵活的方式来拦截对任何目标的调用，无论是方法、函数还是自定义处理程序。
+
+## 调用上下文
+
+`CallContextInterface` 包含有关被拦截调用的所有信息：
+
+- **Target（目标）** — 调用目标的定义（方法、函数、闭包等）
+- **Arguments（参数）** — 调用的参数列表
+- **Attributes（属性）** — 可用于在拦截器之间传递数据的附加上下文
 
 ```php
-use Spiral\Core\InterceptableCore;
-use App\Application\Database\DatabaseQueryCore;
-use Cycle\Database\DatabaseManager;
+namespace Spiral\Interceptors\Context;
 
-$core = new InterceptableCore(
-  new DatabaseQueryCore(new DatabaseManager(...))
-);
+interface CallContextInterface extends AttributedInterface
+{
+    public function getTarget(): TargetInterface;
+    public function getArguments(): array;
+    public function withTarget(TargetInterface $target): static;
+    public function withArguments(array $arguments): static;
+    
+    // AttributedInterface 中的方法：
+    public function getAttributes(): array;
+    public function getAttribute(string $name, mixed $default = null): mixed;
+    public function withAttribute(string $name, mixed $value): static;
+    public function withoutAttribute(string $name): static;
+}
 ```
 
-下面是一个如何调用 `DatabaseQueryCore` 类来处理数据库查询的例子：
+> **注意**
+> `CallContextInterface` 是不可变的，所以调用 `withTarget()` 和 `withArguments()` 会返回具有更新值的新实例。
+
+## 目标接口
+
+`TargetInterface` 定义了要拦截调用的目标。它可以表示方法、函数、闭包，甚至是 RPC 或消息队列端点的路径字符串。
 
 ```php
-// Execute a SELECT statement on the 'default' database
-$result = $core->callAction(
-  'default', 
-  'SELECT * FROM users WHERE id = ?', 
-  ['sql_parameters' => [1]]
-);
+namespace Spiral\Interceptors\Context;
+
+interface TargetInterface extends \Stringable
+{
+    public function getPath(): array;
+    public function withPath(array $path, ?string $delimiter = null): static;
+    public function getReflection(): ?\ReflectionFunctionAbstract;
+    public function getObject(): ?object;
+    public function getCallable(): callable|array|null;
+}
 ```
 
-`callAction` 方法将返回一个 `Cycle\Database\StatementInterface` 对象，该对象表示查询的结果。
+### 创建目标
 
-现在我们来讨论一下拦截器。
+`Target` 类中的静态工厂方法使创建不同类型的目标变得容易：
 
-## 拦截器
+```php
+use Spiral\Interceptors\Context\Target;
 
-拦截器的工作方式与 HTTP 请求中的中间件类似，它们允许开发人员在处理流程的各个点为应用程序添加功能。但是，与通常特定于 HTTP 请求的中间件不同，拦截器可用于为各种组件添加功能。
+// 从方法反射创建
+$target = Target::fromReflectionMethod(new \ReflectionMethod(UserController::class, 'show'), UserController::class);
 
-拦截器应该实现 `Spiral\Core\CoreInterceptorInterface` 接口，该接口要求它们定义一个 `process` 方法。框架会在应用程序执行的特定点调用此方法，例如在调用控制器操作之前或之后。
+// 从函数反射创建
+$target = Target::fromReflectionFunction(new \ReflectionFunction('array_map'));
 
-例如，我们可以创建一个 `SlowQueryDetectorInterceptor` 类，该类实现了 `CoreInterceptorInterface` 并记录慢查询。
+// 从闭包创建
+$target = Target::fromClosure(fn() => 'Hello, World!');
 
-```php app/src/Integration/Database/Interceptor/SlowQueryDetectorInterceptor.php
-namespace App\Integration\Database\Interceptor;
+// 从路径字符串创建（用于 RPC 端点或消息队列处理程序）
+$target = Target::fromPathString('user.show');
+
+// 从控制器-操作对创建
+$target = Target::fromPair(UserController::class, 'show');
+```
+
+## 创建拦截器
+
+让我们创建一个简单的拦截器，用于记录调用的执行时间：
+
+```php
+namespace App\Interceptor;
 
 use Psr\Log\LoggerInterface;
-use Spiral\Core\CoreInterceptorInterface;
-use Spiral\Core\CoreInterface;
+use Spiral\Interceptors\Context\CallContextInterface;
+use Spiral\Interceptors\HandlerInterface;
+use Spiral\Interceptors\InterceptorInterface;
 
-class SlowQueryDetectorInterceptor implements CoreInterceptorInterface
+class ExecutionTimeInterceptor implements InterceptorInterface
 {
     public function __construct(
         private readonly LoggerInterface $logger
     ) {
     }
 
-    public function process(string $database, string $sql, array $parameters, CoreInterface $core): mixed
+    public function intercept(CallContextInterface $context, HandlerInterface $handler): mixed
     {
+        $target = $context->getTarget();
         $startTime = \microtime(true);
 
-        $result = $core->callAction($database, $sql, $parameters);
-        
-        $elapsed = \microtime(true) - $startTime;
+        try {
+            return $handler->handle($context);
+        } finally {
+            $executionTime = \microtime(true) - $startTime;
 
-        if ($elapsed > 0.1) {
-            $this->logger->warning(
-                'Slow query detected',
+            $this->logger->debug(
+                'Target executed',
                 [
-                    'database' => $database,
-                    'sql' => $sql,
-                    'parameters' => $parameters,
-                    'elapsed' => $elapsed
+                    'target' => (string)$target,
+                    'execution_time' => $executionTime,
                 ]
             );
+        }
+    }
+}
+```
+
+这个拦截器：
+1. 记录开始时间
+2. 将调用传递给链中的下一个处理程序
+3. 一旦处理程序完成，计算并记录执行时间
+
+## 构建拦截器管道
+
+要使用拦截器，你需要使用 `PipelineBuilderInterface` 构建一个拦截器管道：
+
+```php
+use Spiral\Interceptors\PipelineBuilder;
+use Spiral\Interceptors\Context\CallContext;
+use Spiral\Interceptors\Context\Target;
+use Spiral\Interceptors\Handler\CallableHandler;
+use App\Interceptor\ExecutionTimeInterceptor;
+use App\Interceptor\AuthorizationInterceptor;
+
+// 创建拦截器
+$interceptors = [
+    new ExecutionTimeInterceptor($logger),
+    new AuthorizationInterceptor($auth),
+];
+
+// 构建管道
+$pipeline = (new PipelineBuilder())
+    ->withInterceptors(...$interceptors)
+    ->build(new CallableHandler());
+
+// 创建调用上下文
+$context = new CallContext(
+    target: Target::fromPair(UserController::class, 'show'),
+    arguments: ['id' => 42],
+    attributes: ['request' => $request]
+);
+
+// 执行管道
+$result = $pipeline->handle($context);
+```
+
+## 处理程序
+
+管道应该以执行目标的处理程序结束。Spiral 提供了几个内置的处理程序：
+
+### CallableHandler
+
+`CallableHandler` 简单地调用目标，不进行任何额外处理：
+
+```php
+use Spiral\Interceptors\Handler\CallableHandler;
+
+$handler = new CallableHandler();
+```
+
+### AutowireHandler
+
+`AutowireHandler` 使用容器解析缺失的参数：
+
+```php
+use Spiral\Interceptors\Handler\AutowireHandler;
+
+$handler = new AutowireHandler($container);
+```
+
+当处理控制器时，这个处理程序很有用，你可以自动注入服务依赖。
+
+## 高级示例
+
+以下是使用拦截器的更全面示例：
+
+```php
+namespace App\Controller;
+
+use App\Interceptor\AuthorizationInterceptor;
+use App\Interceptor\CacheInterceptor;
+use App\Interceptor\ExecutionTimeInterceptor;
+use App\User\UserService;
+use Psr\Container\ContainerInterface;
+use Spiral\Core\Attribute\Proxy;
+use Spiral\Core\CompatiblePipelineBuilder;
+use Spiral\Interceptors\Context\CallContext;
+use Spiral\Interceptors\Context\Target;
+use Spiral\Interceptors\Handler\AutowireHandler;
+
+class UserController
+{
+    private $pipeline;
+
+    public function __construct(
+        private readonly UserService $userService,
+        #[Proxy] ContainerInterface $container
+    ) {
+        // 使用拦截器构建管道
+        $this->pipeline = (new CompatiblePipelineBuilder())
+            ->withInterceptors(
+                new ExecutionTimeInterceptor($container->get(LoggerInterface::class)),
+                new AuthorizationInterceptor($container->get(AuthInterface::class)),
+                new CacheInterceptor($container->get(CacheInterface::class))
+            )
+            ->build(new AutowireHandler($container));
+    }
+
+    public function show(int $id)
+    {
+        // 为目标方法创建上下文
+        $context = new CallContext(
+            target: Target::fromReflectionMethod(
+                new \ReflectionMethod($this->userService, 'findUser'),
+                $this->userService
+            ),
+            arguments: ['id' => $id]
+        );
+
+        // 执行管道
+        return $this->pipeline->handle($context);
+    }
+}
+```
+
+在这个例子中：
+1. 我们构建了一个管道，包括执行时间记录、授权检查和结果缓存
+2. 我们使用 `AutowireHandler` 从容器中解析缺失的参数
+3. 控制器方法创建一个上下文，目标是 `UserService` 的 `findUser` 方法
+4. 管道执行所有拦截器，然后调用目标方法
+
+> **注意**
+> 要了解容器作用域和代理对象，请参阅文档中的 [IoC 作用域](../container/scopes.md) 部分。
+
+## 与旧版拦截器的比较
+
+> **注意**
+> 不再推荐基于 `spiral/hmvc` 的旧实现拦截器。
+> 你可以在 [https://spiral.dev/docs/framework-interceptors/3.13](https://spiral.dev/docs/framework-interceptors/3.13) 找到旧文档。
+
+在 Spiral 3.14.0 中，`spiral/interceptors` 包引入了新的拦截器实现。
+以下是新实现与旧实现的区别：
+
+:::: tabs
+
+::: tab 旧版拦截器
+```php
+namespace App\Interceptor;
+
+use Psr\SimpleCache\CacheInterface;
+use Spiral\Core\CoreInterface;
+use Spiral\Core\CoreInterceptorInterface;
+
+class CacheInterceptor implements CoreInterceptorInterface
+{
+    public function __construct(
+        private readonly CacheInterface $cache,
+        private readonly int $ttl = 3600,
+    ) {}
+
+    public function process(string $controller, string $action, array $parameters, CoreInterface $core): mixed
+    {
+        // 第1步：根据控制器、操作和参数生成缓存键
+        $cacheKey = $this->generateCacheKey($controller, $action, $parameters);
+
+        // 第2步：检查结果是否已缓存
+        if ($this->cache->has($cacheKey)) {
+            // 如果可用，返回缓存的结果
+            return $this->cache->get($cacheKey);
+        }
+
+        // 第3步：如果没有缓存的结果，执行控制器操作
+        $result = $core->callAction($controller, $action, $parameters);
+
+        // 第4步：为未来的请求缓存结果
+        if ($this->isCacheable($result)) {
+            $this->cache->set($cacheKey, $result, $this->ttl);
         }
 
         return $result;
     }
-}
-```
 
-现在我们可以使用 `InterceptableCore` 类注册 `SlowQueryDetectorInterceptor` 类，并调用 `callAction` 方法来处理数据库查询。
-
-```php
-use Spiral\Core\InterceptableCore;
-use App\Application\Database\DatabaseQueryCore;
-use Cycle\Database\DatabaseManager;
-
-$core = new InterceptableCore(
-  new DatabaseQueryCore(new DatabaseManager(...))
-);
-
-$core->addInterceptor(new SlowQueryDetectorInterceptor(new Logger(...)));
-
-// Execute a SELECT statement on the 'default' database
-$result = $core->callAction(
-  'default', 
-  'SELECT * FROM users WHERE id = ?', 
-  ['sql_parameters' => [1]]
-);
-```
-
-现在，每次调用 `callAction` 方法时，都会调用 `SlowQueryDetectorInterceptor` 类并记录慢查询。
-
-我们还可以向 `InterceptableCore` 类添加多个拦截器。例如，我们可以创建另一个拦截器来处理数据库异常，并在某些情况下尝试重新连接到数据库。
-
-```php app/src/Integration/Database/Interceptor/DatabaseConnectionInterceptor.php
-namespace App\Integration\Database\Interceptor;
-
-use Spiral\Core\CoreInterceptorInterface;
-use Spiral\Core\CoreInterface;
-use Cycle\Database\Exception\StatementException\ConnectionException;
-
-final class DatabaseConnectionInterceptor implements CoreInterceptorInterface
-{
-    // ...
-
-    public function process(string $database, string $sql, array $parameters, CoreInterface $core): mixed
+    private function generateCacheKey(string $controller, string $action, array $parameters): string
     {
-        try {
-            return $core->callAction($database, $sql, $parameters);
-        } catch (ConnectionException $e) {
-            // Try to reconnect...
+        // 从控制器、操作和参数创建确定性的缓存键
+        return \md5($controller . '::' . $action . '::' . \serialize($parameters));
+    }
 
-            // For example, switch to another database...
-            return $this->process('slave', $sql, $parameters, $core);
-        }
+    private function isCacheable(mixed $result): bool
+    {
+        // 只缓存可序列化的结果
+        return !\is_resource($result) && (
+                \is_scalar($result) ||
+                \is_array($result) ||
+                $result instanceof \Serializable ||
+                $result instanceof \stdClass
+            );
     }
 }
 ```
+:::
 
-不要忘记使用 `InterceptableCore` 类注册 `DatabaseConnectionInterceptor` 类。
-
+::: tab 新版拦截器
 ```php
-$core->addInterceptor(new DatabaseConnectionInterceptor(...));
-$core->addInterceptor(new SlowQueryDetectorInterceptor(new Logger(...)));
-```
+namespace App\Interceptor;
 
-你可以将任何参数传递给 `callAction` 方法，这些参数可以被拦截器使用。例如：
+use Psr\SimpleCache\CacheInterface;
+use Spiral\Interceptors\Context\CallContextInterface;
+use Spiral\Interceptors\Context\TargetInterface;
+use Spiral\Interceptors\HandlerInterface;
+use Spiral\Interceptors\InterceptorInterface;
 
-```php
-public function process(string $database, string $sql, array $parameters, CoreInterface $core): mixed
+final class CacheInterceptor implements InterceptorInterface
 {
-    // $sql = SELECT * FROM users WHERE id = ?
-    $sql .= ' LIMIT ?';
-    
-    $parameters['sql_parameters'][] = 10;
-    
-    return $core->callAction($database, $sql, $parameters);
+    public function __construct(
+        private readonly CacheInterface $cache,
+        private readonly int $ttl = 3600,
+    ) {}
+
+    public function intercept(CallContextInterface $context, HandlerInterface $handler): mixed
+    {
+        // 第1步：使用目标路径和参数生成缓存键
+        $cacheKey = $this->generateCacheKey($context->getTarget(), $context->getArguments());
+
+        // 第2步：检查结果是否已缓存
+        if ($this->cache->has($cacheKey)) {
+            // 如果可用，返回缓存的结果
+            return $this->cache->get($cacheKey);
+        }
+
+        // 第3步：如果没有缓存的结果，执行目标
+        $result = $handler->handle($context);
+
+        // 第4步：为未来的请求缓存结果
+        if ($this->isCacheable($result)) {
+            $this->cache->set($cacheKey, $result, $this->ttl);
+        }
+
+        return $result;
+    }
+
+    private function generateCacheKey(TargetInterface $target, array $args): string
+    {
+        // 从目标字符串和参数创建确定性的缓存键
+        return \md5((string) $target . '::' . serialize($args));
+    }
+
+    private function isCacheable(mixed $result): bool
+    {
+        // 只缓存可序列化的结果
+        return !\is_resource($result) && (
+                \is_scalar($result) ||
+                \is_array($result) ||
+                $result instanceof \Serializable ||
+                $result instanceof \stdClass
+            );
+    }
+}
+```
+:::
+
+::::
+
+### 接口变化
+
+**旧接口：**
+```php
+interface CoreInterceptorInterface
+{
+    public function process(string $controller, string $action, array $parameters, CoreInterface $core): mixed;
 }
 ```
 
-正如你所看到的，拦截器是一种方便的方式来拦截和修改应用程序某些部分的行为，使其更具功能性和效率，同时保持特定于域的逻辑清晰和可维护。
+**新接口：**
+```php
+interface InterceptorInterface
+{
+    public function intercept(CallContextInterface $context, HandlerInterface $handler): mixed;
+}
+```
+
+主要区别：
+- `$controller` 和 `$action` 参数已被更灵活的 `Target` 概念替代
+- `$parameters` 数组现在是 `CallContext` 的一部分
+- 取代 `CoreInterface`，现在有一个提供更多灵活性的 `HandlerInterface`
+
+### 兼容性
+
+在 Spiral 3.x 中，同时支持旧拦截器（`CoreInterceptorInterface`）和新拦截器（`InterceptorInterface`）。
+但是，旧实现已被弃用，将在 Spiral 4.x 中排除。
+
+如果你需要同时使用两种实现，请使用 `CompatiblePipelineBuilder`：
+
+```php
+use Spiral\Core\CompatiblePipelineBuilder;
+use Spiral\Core\CoreInterceptorInterface; // 旧版拦截器
+use Spiral\Interceptors\InterceptorInterface; // 新版拦截器
+
+$pipeline = (new CompatiblePipelineBuilder())
+    ->withInterceptors(
+        new LegacyStyleInterceptor(), // 实现 CoreInterceptorInterface
+        new NewStyleInterceptor()     // 实现 InterceptorInterface
+    )
+    ->build(new CallableHandler());
+```
+
+### 迁移指南
+
+从旧实现迁移时：
+- 将 `CoreInterceptorInterface` 替换为 `InterceptorInterface`
+- 使用 `Target` 替代 `$controller` 和 `$action` 参数
+- 将 `$parameters` 移至 `CallContext`
+- 将 `$core->callAction()` 替换为 `$handler->handle()`
 
 ## 事件
 
-| 事件                                | 描述                                                       |
-|--------------------------------------|-----------------------------------------------------------|
-| Spiral\Core\Event\InterceptorCalling | 在调用拦截器`之前`将触发该事件。 |
+| 事件                                        | 描述                                     |
+|----------------------------------------------|-----------------------------------------|
+| Spiral\Interceptors\Event\InterceptorCalling | 在调用拦截器之前触发。                    |
+
+> **警告**
+> `Spiral\Core\Event\InterceptorCalling` 事件仅由旧实现中的已弃用 `\Spiral\Core\InterceptorPipeline` 分发。
+> 框架的新实现不使用此事件。
 
 > **注意**
-> 要了解有关分发事件的更多信息，请参阅我们文档中的[事件](../advanced/events.md)部分。
+> 要了解有关分发事件的更多信息，请参阅文档中的 [事件](../advanced/events.md) 部分。

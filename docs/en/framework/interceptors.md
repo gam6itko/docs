@@ -139,7 +139,7 @@ class ExecutionTimeInterceptor implements InterceptorInterface
             return $handler->handle($context);
         } finally {
             $executionTime = \microtime(true) - $startTime;
-            
+
             $this->logger->debug(
                 'Target executed',
                 [
@@ -288,6 +288,126 @@ In this example:
 In Spiral 3.14.0, a new implementation of interceptors was introduced in the `spiral/interceptors` package.
 Here's how the new implementation differs from the legacy one:
 
+:::: tabs
+
+::: tab Legacy Interceptors
+```php
+namespace App\Interceptor;
+
+use Psr\SimpleCache\CacheInterface;
+use Spiral\Core\CoreInterface;
+use Spiral\Core\CoreInterceptorInterface;
+
+class CacheInterceptor implements CoreInterceptorInterface
+{
+    public function __construct(
+        private readonly CacheInterface $cache,
+        private readonly int $ttl = 3600,
+    ) {}
+
+    public function process(string $controller, string $action, array $parameters, CoreInterface $core): mixed
+    {
+        // Step 1: Generate a cache key based on controller, action, and parameters
+        $cacheKey = $this->generateCacheKey($controller, $action, $parameters);
+
+        // Step 2: Check if the result is already cached
+        if ($this->cache->has($cacheKey)) {
+            // Return cached result if available
+            return $this->cache->get($cacheKey);
+        }
+
+        // Step 3: Execute the controller action if no cached result
+        $result = $core->callAction($controller, $action, $parameters);
+
+        // Step 4: Cache the result for future requests
+        if ($this->isCacheable($result)) {
+            $this->cache->set($cacheKey, $result, $this->ttl);
+        }
+
+        return $result;
+    }
+
+    private function generateCacheKey(string $controller, string $action, array $parameters): string
+    {
+        // Create a deterministic cache key from controller, action, and parameters
+        return \md5($controller . '::' . $action . '::' . \serialize($parameters));
+    }
+
+    private function isCacheable(mixed $result): bool
+    {
+        // Only cache serializable results
+        return !\is_resource($result) && (
+                \is_scalar($result) ||
+                \is_array($result) ||
+                $result instanceof \Serializable ||
+                $result instanceof \stdClass
+            );
+    }
+}
+```
+:::
+
+::: tab New Interceptors
+```php
+namespace App\Interceptor;
+
+use Psr\SimpleCache\CacheInterface;
+use Spiral\Interceptors\Context\CallContextInterface;
+use Spiral\Interceptors\Context\TargetInterface;
+use Spiral\Interceptors\HandlerInterface;
+use Spiral\Interceptors\InterceptorInterface;
+
+final class CacheInterceptor implements InterceptorInterface
+{
+    public function __construct(
+        private readonly CacheInterface $cache,
+        private readonly int $ttl = 3600,
+    ) {}
+
+    public function intercept(CallContextInterface $context, HandlerInterface $handler): mixed
+    {
+        // Step 1: Generate a cache key using target path and arguments
+        $cacheKey = $this->generateCacheKey($context->getTarget(), $context->getArguments());
+
+        // Step 2: Check if the result is already cached
+        if ($this->cache->has($cacheKey)) {
+            // Return cached result if available
+            return $this->cache->get($cacheKey);
+        }
+
+        // Step 3: Execute the target if no cached result
+        $result = $handler->handle($context);
+
+        // Step 4: Cache the result for future requests
+        if ($this->isCacheable($result)) {
+            $this->cache->set($cacheKey, $result, $this->ttl);
+        }
+
+        return $result;
+    }
+
+    private function generateCacheKey(TargetInterface $target, array $args): string
+    {
+        // Create a deterministic cache key from target string and arguments
+        return \md5((string) $target . '::' . serialize($args));
+    }
+
+    private function isCacheable(mixed $result): bool
+    {
+        // Only cache serializable results
+        return !\is_resource($result) && (
+                \is_scalar($result) ||
+                \is_array($result) ||
+                $result instanceof \Serializable ||
+                $result instanceof \stdClass
+            );
+    }
+}
+```
+:::
+
+::::
+
 ### Interface Changes
 
 **Legacy Interface:**
@@ -344,7 +464,10 @@ When migrating from the legacy implementation:
 | Event                                        | Description                                     |
 |----------------------------------------------|-------------------------------------------------|
 | Spiral\Interceptors\Event\InterceptorCalling | Fired before calling an interceptor.            |
-| Spiral\Core\Event\InterceptorCalling         | (Deprecated) Fired before calling a legacy interceptor. |
+
+> **Warning**
+> The `Spiral\Core\Event\InterceptorCalling` event is only dispatched by the deprecated `\Spiral\Core\InterceptorPipeline` 
+> from the legacy implementation. The framework's new implementation does not use this event.
 
 > **Note**
 > To learn more about dispatching events, see the [Events](../advanced/events.md) section in our documentation.

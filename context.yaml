@@ -45,3 +45,21 @@ documents:
           - resources/guidelines
         filePattern: '*.md'
         renderFormat: ascii
+
+prompts:
+  - id: translate-docs
+    description: 'Translate documentation to a specific language'
+    schema:
+      properties:
+        language:
+          description: 'Language to translate the documentation into'
+      required:
+        - language
+        - file-path
+
+    messages:
+      - role: user
+        content: |
+          Look at the origin file(s) with actual documentation in English.
+          1. Find the same file(s) for the `{{language}}` localization (just replace "/en/" with "/{{language}}/" in the path).
+          2. Update the found doc with the content from the original file(s) translating it to `{{language}}` language.

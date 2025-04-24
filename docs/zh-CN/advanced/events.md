@@ -253,7 +253,7 @@ class UserWasCreatedListener
 
 ## 拦截器 (Interceptors)
 
-Events 组件提供了拦截事件的能力。当你需要修改事件数据，或者例如通过 websockets 发送事件时，这很有用。为此，你需要创建一个拦截器类，该类实现 `Spiral\Core\CoreInterceptorInterface` 接口。
+Events 组件提供了拦截事件的能力。当你需要修改事件数据或者例如通过 websockets 发送事件时，这很有用。为此，你需要创建一个拦截器类，该类实现 `Spiral\Interceptors\InterceptorInterface` 接口。
 
 **例子 (Example)**
 
@@ -261,32 +261,32 @@ Events 组件提供了拦截事件的能力。当你需要修改事件数据，�
 namespace App\Broadcasting;
 
 use Spiral\Broadcasting\BroadcastInterface;
-use Spiral\Core\CoreInterceptorInterface;
-use Spiral\Core\CoreInterface;
+use Spiral\Interceptors\Context\CallContextInterface;
+use Spiral\Interceptors\HandlerInterface;
+use Spiral\Interceptors\InterceptorInterface;
 use Spiral\Queue\SerializerRegistryInterface;
 
-final class BroadcastEventInterceptor implements CoreInterceptorInterface
+final class BroadcastEventInterceptor implements InterceptorInterface
 {
     public function __construct(
         private readonly BroadcastInterface $broadcast,
-        private readonly SerializerRegistryInterface $registry
-    ) {
-    }
+        private readonly SerializerRegistryInterface $registry,
+    ) {}
 
-    public function process(string $controller, string $action, array $parameters, CoreInterface $core): mixed
+    public function intercept(CallContextInterface $context, HandlerInterface $handler): mixed
     {
-        $event = $parameters['event'];
+        $event = $context->getArguments()['event'];
 
-        // 首先分发事件 (Dispatch event first)
-        $result = $core->callAction($controller, $action, $parameters);
+        // 首先分发事件
+        $result = $handler->handle($context);
 
-        // 在分发后广播事件 (Broadcast event after dispatch)
+        // 在分发后广播事件
         if ($event instanceof ShouldBroadcastInterface) {
             $this->broadcast->publish(
                 $event->getBroadcastTopics(),
                 $this->registry->getSerializer('json')->serialize(
-                    ['event' => $event->getEventName(), 'data' => $event->getPayload()]
-                )
+                    ['event' => $event->getEventName(), 'data' => $event->getPayload()],
+                ),
             );
         }
 

@@ -23,28 +23,31 @@ Here is an example of a simple interceptor that logs a request before and after 
 ```php
 namespace App\Endpoint\GRPC\Interceptor;
 
-use Spiral\Core\CoreInterceptorInterface;
-use Spiral\Core\CoreInterface;
+use Psr\Log\LoggerInterface;
+use Spiral\Interceptors\Context\CallContextInterface;
+use Spiral\Interceptors\HandlerInterface;
+use Spiral\Interceptors\InterceptorInterface;
 
-final class LogInterceptor implements CoreInterceptorInterface
+final class LogInterceptor implements InterceptorInterface
 {
     public function __construct(
-        private readonly \Psr\Log\LoggerInterface $core,
-    ) {
-    }
-    
-    public function process(string $name, string $action, array $parameters, CoreInterface $core): string
+        private readonly LoggerInterface $logger,
+    ) {}
+
+    public function intercept(CallContextInterface $context, HandlerInterface $handler): mixed
     {
+        $target = $context->getTarget();
+
         $this->logger->info('Request received...', [
-            'name' => $name,
-            'action' => $action,
+            'target' => (string) $target,
+            'path' => $target->getPath(),
         ]);
-        
-        $response = $core->callAction($name, $action, $parameters);
-        
+
+        $response = $handler->handle($context);
+
         $this->logger->info('Request processed', [
-            'name' => $name,
-            'action' => $action,
+            'target' => (string)$target,
+            'path' => $target->getPath(),
         ]);
 
         return $response;
@@ -60,23 +63,23 @@ and convert them to a gRPC exception.
 ```php
 namespace App\Endpoint\GRPC\Interceptor;
 
-use Spiral\Core\CoreInterceptorInterface;
-use Spiral\Core\CoreInterface;
 use Spiral\Exceptions\ExceptionReporterInterface;
+use Spiral\Interceptors\Context\CallContextInterface;
+use Spiral\Interceptors\HandlerInterface;
+use Spiral\Interceptors\InterceptorInterface;
 use Spiral\RoadRunner\GRPC\Exception\GRPCException;
 use Spiral\RoadRunner\GRPC\Exception\GRPCExceptionInterface;
 
-final class ExceptionHandlerInterceptor implements CoreInterceptorInterface
+final class ExceptionHandlerInterceptor implements InterceptorInterface
 {
     public function __construct(
-        private readonly ExceptionReporterInterface $reporter
-    ) {
-    }
+        private readonly ExceptionReporterInterface $reporter,
+    ) {}
 
-    public function process(string $controller, string $action, array $parameters, CoreInterface $core): mixed
+    public function intercept(CallContextInterface $context, HandlerInterface $handler): mixed
     {
         try {
-            return $core->callAction($controller, $action, $parameters);
+            return $handler->handle($context);
         } catch (\Throwable $e) {
             $this->reporter->report($e);
 
@@ -86,7 +89,7 @@ final class ExceptionHandlerInterceptor implements CoreInterceptorInterface
 
             throw new GRPCException(
                 message: $e->getMessage(),
-                previous: $e
+                previous: $e,
             );
         }
     }
@@ -100,35 +103,37 @@ Here is an example of a simple interceptor that receives trace context from the 
 ```php
 namespace App\Endpoint\GRPC\Interceptor;
 
-use Spiral\Core\CoreInterceptorInterface;
+use Spiral\Interceptors\Context\CallContextInterface;
+use Spiral\Interceptors\HandlerInterface;
+use Spiral\Interceptors\InterceptorInterface;
 use Spiral\Telemetry\TraceKind;
 use Spiral\Telemetry\TracerFactoryInterface;
-use Spiral\Core\CoreInterface;
 
-class InjectTelemetryFromContextInterceptor implements CoreInterceptorInterface
+class InjectTelemetryFromContextInterceptor implements InterceptorInterface
 {
     public function __construct(
-        private readonly TracerFactoryInterface $tracerFactory
-    ) {
-    }
+        private readonly TracerFactoryInterface $tracerFactory,
+    ) {}
 
-    public function process(string $controller, string $action, array $parameters, CoreInterface $core): mixed
+    public function intercept(CallContextInterface $context, HandlerInterface $handler): mixed
     {
-        $traceContext = [];
+        $ctx = $context->getArguments()[0] ?? null;
 
-        if (isset($parameters['ctx']) and $parameters['ctx'] instanceof RequestContext) {
-            $traceContext = $parameters['ctx']->getValue('telemetry-trace-id') ?? [];
-        }
+        $traceContext = $ctx instanceof \Spiral\RoadRunner\GRPC\ContextInterface
+            ? (array) $ctx->getValue('telemetry-trace-id')
+            : [];
+
+        $target = $context->getTarget();
 
         return $this->tracerFactory->make($traceContext)->trace(
             name: \sprintf('Interceptor [%s]', __CLASS__),
-            callback: static fn(): mixed => $core->callAction($controller, $action, $parameters),
+            callback: static fn(): mixed => $handler->handle($context),
             attributes: [
-                'controller' => $controller,
-                'action' => $action,
+                'target' => (string) $target,
+                'path' => $target->getPath(),
             ],
             scoped: true,
-            traceKind: TraceKind::SERVER
+            traceKind: TraceKind::SERVER,
         );
     }
 }
@@ -144,27 +149,34 @@ namespace App\Endpoint\GRPC\Interceptor;
 
 use App\Attribute\Guarded;
 use Spiral\Attributes\ReaderInterface;
-use Spiral\Core\CoreInterceptorInterface;
-use Spiral\Core\CoreInterface;
+use Spiral\Interceptors\Context\CallContextInterface;
+use Spiral\Interceptors\HandlerInterface;
+use Spiral\Interceptors\InterceptorInterface;
 use Spiral\RoadRunner\GRPC\ContextInterface;
 
-final class GuardedInterceptor implements CoreInterceptorInterface
+final class GuardedInterceptor implements InterceptorInterface
 {
     public function __construct(
         private readonly ReaderInterface $reader
     ) {
     }
 
-    public function process(string $class, string $method, array $parameters, CoreInterface $core): mixed
+    public function intercept(CallContextInterface $context, HandlerInterface $handler): mixed
     {
-        $reflMethod = new \ReflectionMethod($class, $method);
-        $attribute = $this->reader->firstFunctionMetadata($reflMethod, Guarded::class);
+        $reflection = $context->getTarget()->getReflection();
+        
+        if ($reflection !== null) {
+            $attribute = $this->reader->firstFunctionMetadata($reflection, Guarded::class);
 
         if ($attribute !== null) {
-            $this->checkAuth($attribute, $parameters['ctx']);
+                $ctx = $context->getArguments()[0] ?? null;
+                if ($ctx instanceof ContextInterface) {
+                    $this->checkAuth($attribute, $ctx);
+                }
+            }
         }
 
-        return $core->callAction($class, $method, $parameters);
+        return $handler->handle($context);
     }
 
     private function checkAuth(Guarded $attribute, ContextInterface $ctx): void
@@ -233,7 +245,7 @@ add cross-cutting functionality such as logging, modifying header, handling resp
 If you want to use client interceptors, you will need to modify a client class from [client SDK](./client.md) section.
 
 > **See more**
-> Read more about interceptors in еру [Framework — Interceptors](../framework/interceptors.md) section.
+> Read more about interceptors in the [Framework — Interceptors](../framework/interceptors.md) section.
 
 ```php app/src/Application/Bootloader/AppBootloader.php
 namespace App\Application\Bootloader;
@@ -406,8 +418,8 @@ class InjectTelemetryIntoContextInterceptor implements CoreInterceptorInterface
             $metadata = $parameters['ctx']->getValue('metadata');
             if(!\is_array($metadata)) {
                 $metadata = [];
-            }
-            
+        }
+
             $metadata['telemetry-trace-id'] = $tracer->getContext();
             $parameters['ctx'] = $parameters['ctx']->withValue('metadata', $metadata);
         }

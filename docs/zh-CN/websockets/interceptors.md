@@ -1,6 +1,6 @@
 # Websockets — 拦截器
 
-Spiral 框架为 WebSockets 服务提供了拦截器，允许你在请求生命周期的各个阶段拦截和修改请求及响应。
+Spiral 为 WebSockets 服务提供了拦截器，允许你在请求生命周期的各个阶段拦截和修改请求及响应。
 
 > **另请参阅**
 > 在 [框架 — 拦截器](../framework/interceptors.md) 部分阅读更多关于拦截器的信息。
@@ -13,38 +13,43 @@ Spiral 框架为 WebSockets 服务提供了拦截器，允许你在请求生命�
 
 以下示例展示了如何创建一个拦截器，该拦截器检查用户的身份验证令牌并将用户的身份提供给服务。其中 `authToken` 是请求数据中包含身份验证令牌的字段的名称。
 
-```php app/src/Entrypoint/Centrifugo/Interceptor/AuthenticatorInterceptor.php
-namespace App\Entrypoint\Centrifugo\Interceptor;
+```php app/src/Endpoint/Centrifugo/Interceptor/AuthenticatorInterceptor.php
+namespace App\Endpoint\Centrifugo\Interceptor;
 
 use Psr\EventDispatcher\EventDispatcherInterface;
 use RoadRunner\Centrifugo\Request\RequestInterface;
 use Spiral\Auth\ActorProviderInterface;
 use Spiral\Auth\AuthContext;
 use Spiral\Auth\AuthContextInterface;
-use Spiral\Core\CoreInterceptorInterface;
-use Spiral\Core\CoreInterface;
+use Spiral\Auth\TokenStorageInterface;
+use Spiral\Core\Scope;
+use Spiral\Interceptors\Context\CallContextInterface;
+use Spiral\Interceptors\HandlerInterface;
+use Spiral\Interceptors\InterceptorInterface;
 use Spiral\Core\ScopeInterface;
 use Spiral\Prototype\Traits\PrototypeTrait;
 
-final class AuthenticatorInterceptor implements CoreInterceptorInterface
+final class AuthenticatorInterceptor implements InterceptorInterface
 {
     use PrototypeTrait;
 
     public function __construct(
         private readonly ScopeInterface $scope,
         private readonly ActorProviderInterface $actorProvider,
+        private readonly TokenStorageInterface $authTokens,
         private readonly ?EventDispatcherInterface $eventDispatcher = null,
-    ) {
-    }
+    ) {}
 
-    public function process(string $controller, string $action, array $parameters, CoreInterface $core): mixed
+    public function intercept(CallContextInterface $context, HandlerInterface $handler): mixed
     {
-        $request = $parameters['request'];
+        $args = $context->getArguments();
+        $request = $args['request'];
         \assert($request instanceof RequestInterface);
 
         $authToken = $request->getData()['authToken'] ?? null;
+        $token = $authToken === null ? null : $this->authTokens->load($authToken);
 
-        if (!$authToken || !$token = $this->authTokens->load($authToken)) {
+        if ($token === null) {
             $request->error(403, 'Unauthorized');
             return null;
         }
@@ -52,16 +57,16 @@ final class AuthenticatorInterceptor implements CoreInterceptorInterface
         $auth = new AuthContext($this->actorProvider, $this->eventDispatcher);
         $auth->start($token);
 
-        return $this->scope->runScope([
+        return $this->scope->runScope(new Scope(bindings: [
             AuthContextInterface::class => $auth,
-        ], fn () => $core->callAction($controller, $action, $parameters));
+        ]), static fn(): mixed => $handler->handle($context));
     }
 }
 ```
 
 以及如何在服务中使用它的示例：
 
-```php app/src/Entrypoint/Centrifugo/ConnectService.php
+```php app/src/Endpoint/Centrifugo/ConnectService.php
 namespace App\Endpoint\Centrifugo;
 
 use App\Database\User;
@@ -99,32 +104,34 @@ final class ConnectService implements ServiceInterface
 
 以下示例展示了如何创建一个处理错误的拦截器。
 
-```php app/src/Entrypoint/Centrifugo/Interceptor/ExceptionHandlerInterceptor.php
-namespace App\Entrypoint\Centrifugo\Interceptor;
+```php app/src/Endpoint/Centrifugo/Interceptor/ExceptionHandlerInterceptor.php
+namespace App\Endpoint\Centrifugo\Interceptor;
 
-use Spiral\Core\CoreInterceptorInterface;
-use Spiral\Core\CoreInterface;
+use Spiral\Interceptors\Context\CallContextInterface;
+use Spiral\Interceptors\HandlerInterface;
+use Spiral\Interceptors\InterceptorInterface;
 use Spiral\Exceptions\ExceptionReporterInterface;
-use Spiral\RoadRunner\GRPC\Exception\GRPCException;
-use Spiral\RoadRunner\GRPC\Exception\GRPCExceptionInterface;
+use RoadRunner\Centrifugo\Request\RequestInterface;
 
-final class ExceptionHandlerInterceptor implements CoreInterceptorInterface
+final class ExceptionHandlerInterceptor implements InterceptorInterface
 {
     public function __construct(
-        private readonly ExceptionReporterInterface $reporter
-    ) {
-    }
+        private readonly ExceptionReporterInterface $reporter,
+    ) {}
 
-    public function process(string $controller, string $action, array $parameters, CoreInterface $core): mixed
+    public function intercept(CallContextInterface $context, HandlerInterface $handler): mixed
     {
         try {
-            \assert($parameters['request'] instanceof RequestInterface);
+            $args = $context->getArguments();
+            $request = $args['request'];
+            \assert($request instanceof RequestInterface);
 
-            return $core->callAction($controller, $action, $parameters);
+            return $handler->handle($context);
         } catch (\Throwable $e) {
             $this->reporter->report($e);
 
             $request->error($e->getCode(), $e->getMessage());
+            return null;
         }
     }
 }
@@ -132,7 +139,7 @@ final class ExceptionHandlerInterceptor implements CoreInterceptorInterface
 
 之后，你不需要在你的服务中编写 try/catch 块：
 
-```php app/src/Entrypoint/Centrifugo/ConnectService.php
+```php app/src/Endpoint/Centrifugo/ConnectService.php
 namespace App\Endpoint\Centrifugo;
 /**
  * @param Connect $request
@@ -140,7 +147,7 @@ namespace App\Endpoint\Centrifugo;
 public function handle(RequestInterface $request): void
 {
     if (!$this->auth->isAuthenticated()) {
-        thorw new \Exception('Unauthorized', 403);
+        throw new \Exception('Unauthorized', 403);
     }
     
     $request->respond(
@@ -151,7 +158,7 @@ public function handle(RequestInterface $request): void
 
 ## 注册拦截器
 
-要使用此拦截器，你需要在配置文件 `app/config/centrifugo.php` 中注册它们。
+要使用这些拦截器，你需要在配置文件 `app/config/centrifugo.php` 中注册它们。
 
 ```php app/config/centrifugo.php
 use RoadRunner\Centrifugo\Request\RequestType;

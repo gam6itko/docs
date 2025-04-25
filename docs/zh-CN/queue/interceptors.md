@@ -7,7 +7,7 @@ Spiral 为开发者提供了一种方式，通过使用拦截器来定制其作�
 
 拦截器可用于多种用途，例如处理错误，向作业添加额外上下文，或者根据正在处理的作业执行其他操作。
 
-要使用拦截器，您需要实现 `Spiral\Core\CoreInterceptorInterface` 接口。此接口要求您实现 `process` 方法。
+要使用拦截器，您需要实现 `Spiral\Interceptors\InterceptorInterface` 接口。此接口要求您实现 `intercept` 方法。
 
 ## 用于推送的拦截器
 
@@ -16,33 +16,30 @@ Spiral 为开发者提供了一种方式，通过使用拦截器来定制其作�
 ```php
 namespace App\Application\Job\Interceptor;
 
-use Spiral\Core\CoreInterceptorInterface;
-use Spiral\Core\CoreInterface;
-use Spiral\Queue\OptionsInterface;
+use Psr\Log\LoggerInterface;
+use Spiral\Interceptors\Context\CallContextInterface;
+use Spiral\Interceptors\HandlerInterface;
+use Spiral\Interceptors\InterceptorInterface;
 
-final class LogInterceptor implements CoreInterceptorInterface
+final class LogInterceptor implements InterceptorInterface
 {
     public function __construct(
-        private readonly \Psr\Log\LoggerInterface $logger,
-    ) {
-    }
-    
-    /**
-     * @param array{options: ?OptionsInterface, payload: array} $parameters
-     */
-    public function process(string $name, string $action, array $parameters, CoreInterface $core): string
+        private readonly LoggerInterface $logger,
+    ) {}
+
+    public function intercept(CallContextInterface $context, HandlerInterface $handler): mixed
     {
+        $target = $context->getTarget();
+
         $this->logger->info('Job pushing...', [
-            'name' => $name,
-            'action' => $action,
+            'target' => (string) $target,
         ]);
-        
-        $id = $core->callAction($name, $action, $parameters);
-        
+
+        $id = $handler->handle($context);
+
         $this->logger->info('Job pushed', [
             'id' => $id,
-            'name' => $name,
-            'action' => $action,
+            'target' => (string) $target,
         ]);
 
         return $id;
@@ -69,34 +66,36 @@ return [
 ```
 
 > **注意**
-> `callAction` 方法将推送并返回 `id` 字符串。
+> 处理器的 `handle` 方法将推送并返回 `id` 字符串。
 
 ## 用于消费的拦截器
 
-要创建一个拦截器，您需要创建一个类并实现接口 `Spiral\Core\CoreInterceptorInterface`。`callAction` 方法将执行一个消费作业，它不返回任何内容。
+要创建一个拦截器，您需要创建一个类并实现接口 `Spiral\Interceptors\InterceptorInterface`。
+处理器的 `handle` 方法将执行一个消费作业，它不返回任何内容。
 
-让我们创建一个 `JobExceptionsHandlerInterceptor`。这是一个在取消作业之前提供 3 次尝试在消费者中执行作业的类。
+让我们创建一个 `JobExceptionsHandlerInterceptor`，它在作业失败时报告异常：
 
 ```php
 namespace App\Application\Job\Interceptor;
 
-use Spiral\Core\CoreInterceptorInterface;
-use Spiral\Core\CoreInterface;
 use Spiral\Exceptions\ExceptionReporterInterface;
+use Spiral\Interceptors\Context\CallContextInterface;
+use Spiral\Interceptors\HandlerInterface;
+use Spiral\Interceptors\InterceptorInterface;
 
-final class JobExceptionsHandlerInterceptor implements CoreInterceptorInterface
+final class JobExceptionsHandlerInterceptor implements InterceptorInterface
 {
     public function __construct(
         private readonly ExceptionReporterInterface $reporter,
-    ) {
-    }
- 
-    public function process(string $name, string $action, array $parameters, CoreInterface $core): mixed
+    ) {}
+
+    public function intercept(CallContextInterface $context, HandlerInterface $handler): mixed
     {
         try {
-            return $core->callAction($name, $action, $parameters);
+            return $handler->handle($context);
         } catch (\Throwable $e) {
-             $this->reporter->report($e);
+            $this->reporter->report($e);
+            throw $e;
         }
     }
 }
@@ -207,46 +206,45 @@ class AppBootloader extends Bootloader
 当消费者遇到 RetryException 时，它知道应该使用异常中提供的更新选项将作业返回到队列。这使得作业可以根据指定的策略进行重试，从而提高了系统的整体可靠性，因为它允许作业从瞬时问题中恢复。
 
 ```php
-declare(strict_types=1);
-
 namespace App\Endpoint\Job\Interceptor;
 
-use Carbon\Carbon;
 use Psr\Log\LoggerInterface;
-use Spiral\Core\CoreInterceptorInterface;
-use Spiral\Core\CoreInterface;
 use Spiral\Exceptions\ExceptionReporterInterface;
-use Spiral\Queue\Exception\FailException;
+use Spiral\Interceptors\Context\CallContextInterface;
+use Spiral\Interceptors\HandlerInterface;
+use Spiral\Interceptors\InterceptorInterface;
 use Spiral\Queue\Exception\RetryException;
 use Spiral\Queue\Options;
 
-final class RetryPolicyInterceptor implements CoreInterceptorInterface
+final class RetryPolicyInterceptor implements InterceptorInterface
 {
     public function __construct(
         private readonly LoggerInterface $logger,
         private readonly ExceptionReporterInterface $reporter,
         private readonly int $maxAttempts = 3,
         private readonly int $delay = 5,
-    ) {
-    }
+    ) {}
 
-    public function process(string $controller, string $action, array $parameters, CoreInterface $core): mixed
+    public function intercept(CallContextInterface $context, HandlerInterface $handler): mixed
     {
         try {
-            return $core->callAction($controller, $action, $parameters);
+            return $handler->handle($context);
         } catch (\Throwable $e) {
             $this->reporter->report($e);
-            
-            $headers = $parameters['headers'] ?? [];
-            $attempts = (int)($headers['attempts'] ?? $this->maxAttempts);
+
+            $headers = $context->getAttribute('headers', []);
+            $attempts = (int) ($headers['attempts'] ?? $this->maxAttempts);
+
             if ($attempts === 0) {
-                $this->logger->warning('Attempt to fetch package [%s] statistics failed', $controller);
+                $this->logger->warning('Attempt to execute job failed', [
+                    'target' => (string) $context->getTarget(),
+                ]);
                 return null;
             }
 
             throw new RetryException(
                 reason: $e->getMessage(),
-                options: (new Options())->withDelay($this->delay)->withHeader('attempts', (string)($attempts - 1))
+                options: (new Options())->withDelay($this->delay)->withHeader('attempts', (string)($attempts - 1)),
             );
         }
     }

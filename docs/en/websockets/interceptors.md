@@ -16,38 +16,43 @@ The following example shows how to create an interceptor that checks the user's 
 user's identity to the service. Where `authToken` is the name of the field in the request data that contains the 
 authentication token.
 
-```php app/src/Entrypoint/Centrifugo/Interceptor/AuthenticatorInterceptor.php
-namespace App\Entrypoint\Centrifugo\Interceptor;
+```php app/src/Endpoint/Centrifugo/Interceptor/AuthenticatorInterceptor.php
+namespace App\Endpoint\Centrifugo\Interceptor;
 
 use Psr\EventDispatcher\EventDispatcherInterface;
 use RoadRunner\Centrifugo\Request\RequestInterface;
 use Spiral\Auth\ActorProviderInterface;
 use Spiral\Auth\AuthContext;
 use Spiral\Auth\AuthContextInterface;
-use Spiral\Core\CoreInterceptorInterface;
-use Spiral\Core\CoreInterface;
+use Spiral\Auth\TokenStorageInterface;
+use Spiral\Core\Scope;
+use Spiral\Interceptors\Context\CallContextInterface;
+use Spiral\Interceptors\HandlerInterface;
+use Spiral\Interceptors\InterceptorInterface;
 use Spiral\Core\ScopeInterface;
 use Spiral\Prototype\Traits\PrototypeTrait;
 
-final class AuthenticatorInterceptor implements CoreInterceptorInterface
+final class AuthenticatorInterceptor implements InterceptorInterface
 {
     use PrototypeTrait;
 
     public function __construct(
         private readonly ScopeInterface $scope,
         private readonly ActorProviderInterface $actorProvider,
+        private readonly TokenStorageInterface $authTokens,
         private readonly ?EventDispatcherInterface $eventDispatcher = null,
-    ) {
-    }
+    ) {}
 
-    public function process(string $controller, string $action, array $parameters, CoreInterface $core): mixed
+    public function intercept(CallContextInterface $context, HandlerInterface $handler): mixed
     {
-        $request = $parameters['request'];
+        $args = $context->getArguments();
+        $request = $args['request'];
         \assert($request instanceof RequestInterface);
 
         $authToken = $request->getData()['authToken'] ?? null;
+        $token = $authToken === null ? null : $this->authTokens->load($authToken);
 
-        if (!$authToken || !$token = $this->authTokens->load($authToken)) {
+        if ($token === null) {
             $request->error(403, 'Unauthorized');
             return null;
         }
@@ -55,16 +60,16 @@ final class AuthenticatorInterceptor implements CoreInterceptorInterface
         $auth = new AuthContext($this->actorProvider, $this->eventDispatcher);
         $auth->start($token);
 
-        return $this->scope->runScope([
+        return $this->scope->runScope(new Scope(bindings: [
             AuthContextInterface::class => $auth,
-        ], fn () => $core->callAction($controller, $action, $parameters));
+        ]), static fn(): mixed => $handler->handle($context));
     }
 }
 ```
 
 And example of how to use it in a service:
 
-```php app/src/Entrypoint/Centrifugo/ConnectService.php
+```php app/src/Endpoint/Centrifugo/ConnectService.php
 namespace App\Endpoint\Centrifugo;
 
 use App\Database\User;
@@ -102,32 +107,34 @@ final class ConnectService implements ServiceInterface
 
 The following example shows how to create an interceptor that handles errors.
 
-```php app/src/Entrypoint/Centrifugo/Interceptor/ExceptionHandlerInterceptor.php
-namespace App\Entrypoint\Centrifugo\Interceptor;
+```php app/src/Endpoint/Centrifugo/Interceptor/ExceptionHandlerInterceptor.php
+namespace App\Endpoint\Centrifugo\Interceptor;
 
-use Spiral\Core\CoreInterceptorInterface;
-use Spiral\Core\CoreInterface;
+use Spiral\Interceptors\Context\CallContextInterface;
+use Spiral\Interceptors\HandlerInterface;
+use Spiral\Interceptors\InterceptorInterface;
 use Spiral\Exceptions\ExceptionReporterInterface;
-use Spiral\RoadRunner\GRPC\Exception\GRPCException;
-use Spiral\RoadRunner\GRPC\Exception\GRPCExceptionInterface;
+use RoadRunner\Centrifugo\Request\RequestInterface;
 
-final class ExceptionHandlerInterceptor implements CoreInterceptorInterface
+final class ExceptionHandlerInterceptor implements InterceptorInterface
 {
     public function __construct(
-        private readonly ExceptionReporterInterface $reporter
-    ) {
-    }
+        private readonly ExceptionReporterInterface $reporter,
+    ) {}
 
-    public function process(string $controller, string $action, array $parameters, CoreInterface $core): mixed
+    public function intercept(CallContextInterface $context, HandlerInterface $handler): mixed
     {
         try {
-            \assert($parameters['request'] instanceof RequestInterface);
+            $args = $context->getArguments();
+            $request = $args['request'];
+            \assert($request instanceof RequestInterface);
 
-            return $core->callAction($controller, $action, $parameters);
+            return $handler->handle($context);
         } catch (\Throwable $e) {
             $this->reporter->report($e);
 
             $request->error($e->getCode(), $e->getMessage());
+            return null;
         }
     }
 }
@@ -135,7 +142,7 @@ final class ExceptionHandlerInterceptor implements CoreInterceptorInterface
 
 After that, you don't need to code into try/catch blocks in your services:
 
-```php app/src/Entrypoint/Centrifugo/ConnectService.php
+```php app/src/Endpoint/Centrifugo/ConnectService.php
 namespace App\Endpoint\Centrifugo;
 /**
  * @param Connect $request
@@ -143,7 +150,7 @@ namespace App\Endpoint\Centrifugo;
 public function handle(RequestInterface $request): void
 {
     if (!$this->auth->isAuthenticated()) {
-        thorw new \Exception('Unauthorized', 403);
+        throw new \Exception('Unauthorized', 403);
     }
     
     $request->respond(
@@ -178,4 +185,3 @@ return [
 ```
 
 You can register interceptors for specific requests or for all requests using the `*` wildcard.
-

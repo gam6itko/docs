@@ -3,11 +3,6 @@
 Spiral provides interceptors for HTTP requests that allow you to intercept and modify requests and responses at various 
 points in the request lifecycle.
 
-The `Spiral\Boot\CoreInterface` is typically bound to the `Spiral\Core\Core` class in the container, by default. The
-`Core` class is responsible for handling controllers and it's the entry point of the application. It's responsible for
-resolving the controllers, handling the request and returning a response. It's also responsible for managing the
-lifecycle of the application and keeping track of the current request and response.
-
 > **See more**
 > Read more about interceptors in the [Framework — Interceptors](../framework/interceptors.md) section.
 
@@ -413,7 +408,7 @@ specifications utilization, you can declare your own factory in the annotation:
 
 ### Pipeline Interceptor
 
-This interceptor allows customising endpoint interceptors using `@Pipeline` annotation.
+This interceptor allows customising endpoint interceptors using the `Pipeline` attribute.
 When declared in the domain core interceptors list, this interceptor injects specified annotated interceptors on the
 position where the `PipelineInterceptor` is declared.
 
@@ -512,93 +507,102 @@ class AppBootloader extends DomainBootloader
 }
 ```
 
-## Route Specific Core
+## Route Specific Interceptors
 
-To activate a core for a specific route, you can create a new instance of the `InterceptableCore` class and pass in the
-original core instance as a parameter. Then you can use the `addInterceptor(` method to register route specific
-interceptors.
+To activate a interceptors pipeline for a specific route, you can build a pipeline using the
+`Spiral\Interceptors\PipelineBuilder` class and register it with the route using the `withHandler()` method.
 
 ```php
-$customCore = new InterceptableCore($core);
-$customCore->addInterceptor(new CustomInterceptor());
+// Create a pipeline for a specific route
+$pipeline = (new PipelineBuilder())
+    ->withInterceptors(new CustomInterceptor())
+    ->build(new CallableHandler());
 
+// Register the route with the custom pipeline
 $router->setRoute(
     'home',
     new Route(
         '/home/<action>',
-        (new Controller(HomeController::class))->withCore($customCore)
+        (new Controller(HomeController::class))->withHandler($pipeline)
     )
 );
 ```
 
-## Route parameters casting
+## Parameter Type Conversion
 
+### Integer Values Conversion
 
-### Integer values casting
-
-If you want to use typed route parameters injection in controllers such as `function user(int $id)`, you need to cast
-values by yourself. You can use domain interceptors for it.
-
-You can see an example of a simple interceptor below:
+If you want to use typed route parameters injection in controllers such as `function user(int $id)`, you need to create an interceptor to handle the type conversion:
 
 ```php
-class StringToIntParametersInterceptor implements CoreInterceptorInterface
+use Spiral\Interceptors\Context\CallContextInterface;
+use Spiral\Interceptors\HandlerInterface;
+use Spiral\Interceptors\InterceptorInterface;
+
+/**
+ * Converts all numeric string arguments to integers.
+ */
+class ParameterTypeCastInterceptor implements InterceptorInterface
 {
-    public function process(string $controller, string $action, array $parameters, CoreInterface $core): mixed
+    public function intercept(CallContextInterface $context, HandlerInterface $handler): mixed
     {
-        foreach ($parameters as $key => $parameter) {
-            if (ctype_digit($parameter)) {
-                $parameters[$key] = (int)$parameter;
+        $arguments = $context->getArguments();
+
+        foreach ($arguments as $key => $value) {
+            if (\is_string($value) && \ctype_digit($value)) {
+                $arguments[$key] = (int) $value;
             }
         }
 
-        return $core->callAction($controller, $action, $parameters);
+        return $handler->handle($context->withArguments($arguments));
     }
 }
 ```
 
-### Value objects casting
+### Value Objects Conversion
 
-You can use the same approach to cast values to value objects.
-
-For example, if controller action expects `Ramsey\Uuid\Uuid` object
-
-```php app/src/Endpoint/Web/UsersController.php
-use Ramsey\Uuid\UuidInterface;
-
-class UserController 
-{
-    public function user(UuidInterface $uuid): User
-    {
-        // ...
-    }
-}
-```
-
-You can automatically cast string values to `Ramsey\Uuid\Uuid` objects using the following interceptor:
+For handling complex type conversions, such as converting string UUIDs to UUID objects:
 
 ```php
-use Spiral\Core\CoreInterceptorInterface;
-use Spiral\Core\CoreInterface;
-use Ramsey\Uuid\UuidInterface;
 use Ramsey\Uuid\Uuid;
+use Ramsey\Uuid\UuidInterface;
+use Spiral\Interceptors\Context\CallContextInterface;
+use Spiral\Interceptors\HandlerInterface;
+use Spiral\Interceptors\InterceptorInterface;
 
-final class UuidParametersConverterInterceptor implements CoreInterceptorInterface
+final class UuidParameterConverterInterceptor implements InterceptorInterface
 {
-    public function process(string $controller, string $action, array $parameters, CoreInterface $core): mixed
+    public function intercept(CallContextInterface $context, HandlerInterface $handler): mixed
     {
-        $refMethod = new \ReflectionMethod($controller, $action);
+        $arguments = $context->getArguments();
+        $target = $context->getTarget();
+        $reflection = $target->getReflection();
 
-        // Iterate all Controller action arguments
-        foreach ($refMethod->getParameters() as $parameter) {
-            // If an arguments has Ramsey\Uuid\UuidInterface type hint.
-            if ($parameter->getType()->getName() === UuidInterface::class) {
-                // Replace argument value with Uuid instance.
-                $parameters[$parameter->getName()] = Uuid::fromString($parameters[$parameter->getName()]);
+        if ($reflection === null) {
+            // If reflection is not available, just call the handler
+            return $handler->handle($context);
+        }
+
+        // Iterate all action arguments
+        foreach ($reflection->getParameters() as $parameter) {
+            $paramName = $parameter->getName();
+            $paramType = $parameter->getType();
+
+            // If parameter exists in arguments and has UuidInterface type hint
+            if (isset($arguments[$paramName]) &&
+                $paramType !== null &&
+                $paramType->getName() === UuidInterface::class
+            ) {
+                try {
+                    // Replace argument value with Uuid instance
+                    $arguments[$paramName] = Uuid::fromString($arguments[$paramName]);
+                } catch (\Throwable $e) {
+                    // Handle invalid UUID format if needed
+                }
             }
         }
 
-        return $core->callAction($controller, $action, $parameters);
+        return $handler->handle($context->withArguments($arguments));
     }
 }
 ```

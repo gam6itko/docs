@@ -10,8 +10,8 @@ which allows developers to hook into the job processing pipeline to perform some
 Interceptors can be useful for a variety of purposes, such as handling errors, adding additional context to the job, or
 performing some other action based on the job being processed.
 
-To use interceptors you will need to implement the `Spiral\Core\CoreInterceptorInterface` interface. This interface
-requires you to implement method `process`.
+To use interceptors you will need to implement the `Spiral\Interceptors\InterceptorInterface` interface. This interface
+requires you to implement the `intercept` method.
 
 ## Interceptor for Push
 
@@ -20,33 +20,30 @@ Here is an example of a simple interceptor that logs a message before and after 
 ```php
 namespace App\Application\Job\Interceptor;
 
-use Spiral\Core\CoreInterceptorInterface;
-use Spiral\Core\CoreInterface;
-use Spiral\Queue\OptionsInterface;
+use Psr\Log\LoggerInterface;
+use Spiral\Interceptors\Context\CallContextInterface;
+use Spiral\Interceptors\HandlerInterface;
+use Spiral\Interceptors\InterceptorInterface;
 
-final class LogInterceptor implements CoreInterceptorInterface
+final class LogInterceptor implements InterceptorInterface
 {
     public function __construct(
-        private readonly \Psr\Log\LoggerInterface $logger,
-    ) {
-    }
-    
-    /**
-     * @param array{options: ?OptionsInterface, payload: array} $parameters
-     */
-    public function process(string $name, string $action, array $parameters, CoreInterface $core): string
+        private readonly LoggerInterface $logger,
+    ) {}
+
+    public function intercept(CallContextInterface $context, HandlerInterface $handler): mixed
     {
+        $target = $context->getTarget();
+
         $this->logger->info('Job pushing...', [
-            'name' => $name,
-            'action' => $action,
+            'target' => (string) $target,
         ]);
-        
-        $id = $core->callAction($name, $action, $parameters);
-        
+
+        $id = $handler->handle($context);
+
         $this->logger->info('Job pushed', [
             'id' => $id,
-            'name' => $name,
-            'action' => $action,
+            'target' => (string) $target,
         ]);
 
         return $id;
@@ -73,36 +70,36 @@ return [
 ```
 
 > **Note**
-> The `callAction` method will push and return the `id` string.
+> The handler's `handle` method will push and return the `id` string.
 
 ## Interceptor for Consume
 
-To create an interceptor, you need to create a class and implement the interface `Spiral\Core\CoreInterceptorInterface`.
-The `callAction` method will execute a consuming job, it doesn't return anything.
+To create an interceptor, you need to create a class and implement the interface `Spiral\Interceptors\InterceptorInterface`.
+The handler's `handle` method will execute a consuming job, it doesn't return anything.
 
-Let's create an `JobExceptionsHandlerInterceptor`. It's a class that provides 3 attempts to execute a job in a consumer
-before cancelling it.
+Let's create an `JobExceptionsHandlerInterceptor` that reports exceptions when a job fails:
 
 ```php
 namespace App\Application\Job\Interceptor;
 
-use Spiral\Core\CoreInterceptorInterface;
-use Spiral\Core\CoreInterface;
 use Spiral\Exceptions\ExceptionReporterInterface;
+use Spiral\Interceptors\Context\CallContextInterface;
+use Spiral\Interceptors\HandlerInterface;
+use Spiral\Interceptors\InterceptorInterface;
 
-final class JobExceptionsHandlerInterceptor implements CoreInterceptorInterface
+final class JobExceptionsHandlerInterceptor implements InterceptorInterface
 {
     public function __construct(
         private readonly ExceptionReporterInterface $reporter,
-    ) {
-    }
- 
-    public function process(string $name, string $action, array $parameters, CoreInterface $core): mixed
+    ) {}
+
+    public function intercept(CallContextInterface $context, HandlerInterface $handler): mixed
     {
         try {
-            return $core->callAction($name, $action, $parameters);
+            return $handler->handle($context);
         } catch (\Throwable $e) {
-             $this->reporter->report($e);
+            $this->reporter->report($e);
+            throw $e;
         }
     }
 }
@@ -222,46 +219,45 @@ updated options provided within the exception. This enables the job to be retrie
 improving the overall reliability of the system by allowing jobs to recover from transient issues.
 
 ```php
-declare(strict_types=1);
-
 namespace App\Endpoint\Job\Interceptor;
 
-use Carbon\Carbon;
 use Psr\Log\LoggerInterface;
-use Spiral\Core\CoreInterceptorInterface;
-use Spiral\Core\CoreInterface;
 use Spiral\Exceptions\ExceptionReporterInterface;
-use Spiral\Queue\Exception\FailException;
+use Spiral\Interceptors\Context\CallContextInterface;
+use Spiral\Interceptors\HandlerInterface;
+use Spiral\Interceptors\InterceptorInterface;
 use Spiral\Queue\Exception\RetryException;
 use Spiral\Queue\Options;
 
-final class RetryPolicyInterceptor implements CoreInterceptorInterface
+final class RetryPolicyInterceptor implements InterceptorInterface
 {
     public function __construct(
         private readonly LoggerInterface $logger,
         private readonly ExceptionReporterInterface $reporter,
         private readonly int $maxAttempts = 3,
         private readonly int $delay = 5,
-    ) {
-    }
+    ) {}
 
-    public function process(string $controller, string $action, array $parameters, CoreInterface $core): mixed
+    public function intercept(CallContextInterface $context, HandlerInterface $handler): mixed
     {
         try {
-            return $core->callAction($controller, $action, $parameters);
+            return $handler->handle($context);
         } catch (\Throwable $e) {
             $this->reporter->report($e);
-            
-            $headers = $parameters['headers'] ?? [];
-            $attempts = (int)($headers['attempts'] ?? $this->maxAttempts);
+
+            $headers = $context->getAttribute('headers', []);
+            $attempts = (int) ($headers['attempts'] ?? $this->maxAttempts);
+
             if ($attempts === 0) {
-                $this->logger->warning('Attempt to fetch package [%s] statistics failed', $controller);
+                $this->logger->warning('Attempt to execute job failed', [
+                    'target' => (string) $context->getTarget(),
+                ]);
                 return null;
             }
 
             throw new RetryException(
                 reason: $e->getMessage(),
-                options: (new Options())->withDelay($this->delay)->withHeader('attempts', (string)($attempts - 1))
+                options: (new Options())->withDelay($this->delay)->withHeader('attempts', (string)($attempts - 1)),
             );
         }
     }

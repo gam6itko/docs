@@ -4,22 +4,17 @@ One of the key features of Spiral is its support for interceptors, which can be 
 application without modifying the core code of the application. This can help to keep your codebase more modular
 and maintainable.
 
-**Here is some benefits of using interceptors:**
+**Benefits of using interceptors:**
 
 - **Separation of Concerns:** Using interceptors allows you to keep the different parts of your application separate and
   organized. For example, you can use an interceptor to handle authentication without having to add that code to every
-  single part of your application that requires authentication. This makes it a lot easier to understand and maintain
-  your code.
-- **Reusability:** With interceptors, you can write code once and use it in multiple parts of your application. This
-  means you don't have to keep writing the same code over and over again, saving you time and reducing the likelihood of
-  mistakes.
+  single part of your application that requires authentication.
+- **Reusability:** With interceptors, you can write code once and use it in multiple parts of your application, reducing code duplication.
 - **Modularity:** The ability to add, remove or replace interceptors without affecting the rest of the application makes
   it more flexible and easy to update.
 - **Performance:** Interceptors can be used to optimize the performance of the application by caching responses,
-  reducing the number of database queries, and more. This means your application will be faster, and less likely to slow
-  down when a lot of users are accessing it at the same time.
-- **Ease of use:** Adding interceptors to your application is relatively easy and straightforward, making it accessible
-  for developers of all skill levels.
+  reducing the number of database queries, and more.
+- **Ease of use:** Adding interceptors to your application is relatively easy and straightforward.
 
 You can use interceptors with various components such as:
 
@@ -28,213 +23,451 @@ You can use interceptors with various components such as:
 - [gRPC](../grpc/interceptors.md)
 - [Websockets](../websockets/interceptors.md)
 - [Queue](../queue/interceptors.md)
+- [Temporal](../temporal/interceptors.md)
 
-> **Note**
-> The `spiral/hmvc` component is required for the domain cores. The web bundle includes this package by default.
+## Interceptor Interface
 
-## Domain Core
+Interceptors implement the `Spiral\Interceptors\InterceptorInterface`:
 
-In order to use interceptors, you need to have a core class that will be responsible for running the specific logic that
-can be intercepted before or after the call.
+```php
+namespace Spiral\Interceptors;
 
-For example, let's say you have a database layer and you need to log database queries, measure query times, and log slow
-queries.
+use Spiral\Interceptors\Context\CallContextInterface;
 
-To achieve this, you can create a `DatabaseQueryCore` class that implements the `Spiral\Core\CoreInterface`. This class
-would be responsible for running the database query and returning the query result.
-
-```php app/src/Integration/Database/DatabaseQueryCore.php
-namespace App\Integration\Database;
-
-use Spiral\Core\CoreInterface;
-use Cycle\Database\DatabaseManager;
-use Cycle\Database\StatementInterface;
-
-final class DatabaseQueryCore implements CoreInterface
+interface InterceptorInterface
 {
-    public function __construct(
-        private readonly DatabaseManager $manager
-    ) {
-    }
-
-    public function callAction(string $database, string $sql, array $parameters = []): StatementInterface
-    {
-        $sqlParameters = $parameters['sql_parameters'] ?? [];
-        \assert(\is_array($sqlParameters));
-
-        $database = $this->manager->database($database);
-        return $database->query(
-            $sql,
-            $sqlParameters
-        );
-    }
+    public function intercept(CallContextInterface $context, HandlerInterface $handler): mixed;
 }
 ```
 
-Then you can use the `Spiral\Core\InterceptableCore` class that allows you to register interceptors and call them when
-you handle the core class.
+The interface provides a flexible way to intercept calls to any target, whether it's a method, function, or custom handler.
+
+## Call Context
+
+The `CallContextInterface` contains all the information about the intercepted call:
+
+- **Target** — the definition of the call target (method, function, closure, etc.)
+- **Arguments** — the list of arguments for the call
+- **Attributes** — additional context that can be used to pass data between interceptors
 
 ```php
-use Spiral\Core\InterceptableCore;
-use App\Application\Database\DatabaseQueryCore;
-use Cycle\Database\DatabaseManager;
+namespace Spiral\Interceptors\Context;
 
-$core = new InterceptableCore(
-  new DatabaseQueryCore(new DatabaseManager(...))
-);
+interface CallContextInterface extends AttributedInterface
+{
+    public function getTarget(): TargetInterface;
+    public function getArguments(): array;
+    public function withTarget(TargetInterface $target): static;
+    public function withArguments(array $arguments): static;
+    
+    // Methods from AttributedInterface:
+    public function getAttributes(): array;
+    public function getAttribute(string $name, mixed $default = null): mixed;
+    public function withAttribute(string $name, mixed $value): static;
+    public function withoutAttribute(string $name): static;
+}
 ```
 
-Here is an example of how to call the `DatabaseQueryCore` class to handle database queries:
+> **Note**
+> `CallContextInterface` is immutable, so calls to `withTarget()` and `withArguments()` return a new instance with the updated values.
+
+## Target Interface
+
+The `TargetInterface` defines the target whose call you want to intercept. It can represent a method, function, closure, or even a path string for RPC or message queue endpoints.
 
 ```php
-// Execute a SELECT statement on the 'default' database
-$result = $core->callAction(
-  'default', 
-  'SELECT * FROM users WHERE id = ?', 
-  ['sql_parameters' => [1]]
-);
+namespace Spiral\Interceptors\Context;
+
+interface TargetInterface extends \Stringable
+{
+    public function getPath(): array;
+    public function withPath(array $path, ?string $delimiter = null): static;
+    public function getReflection(): ?\ReflectionFunctionAbstract;
+    public function getObject(): ?object;
+    public function getCallable(): callable|array|null;
+}
 ```
 
-The `callAction` method will return a `Cycle\Database\StatementInterface` object, which represents the result of the
-query.
+### Creating Targets
 
-Now let's talk about interceptors.
+The static factory methods in the `Target` class make it easy to create different types of targets:
 
-## Interceptors
+```php
+use Spiral\Interceptors\Context\Target;
 
-Interceptors work similarly to middleware in HTTP requests, in that they allow developers to add functionality to the
-application at various points in the processing flow. However, unlike middleware which is typically specific to HTTP
-requests, interceptors can be used to add functionality to a wide range of components.
+// From a method reflection
+$target = Target::fromReflectionMethod(new \ReflectionMethod(UserController::class, 'show'), UserController::class);
 
-Interceptors should implement the `Spiral\Core\CoreInterceptorInterface` interface, which requires them to define
-a `process` method. This method is called by the framework at specific points in the application's execution, such
-as before or after a controller action is invoked.
+// From a function reflection
+$target = Target::fromReflectionFunction(new \ReflectionFunction('array_map'));
 
-For example, we could create an `SlowQueryDetectorInterceptor` class that implements the `CoreInterceptorInterface` and
-logs slow queries.
+// From a closure
+$target = Target::fromClosure(fn() => 'Hello, World!');
 
-```php app/src/Integration/Database/Interceptor/SlowQueryDetectorInterceptor.php
-namespace App\Integration\Database\Interceptor;
+// From a path string (for RPC endpoints or message queue handlers)
+$target = Target::fromPathString('user.show');
+
+// From a controller-action pair
+$target = Target::fromPair(UserController::class, 'show');
+```
+
+## Creating an Interceptor
+
+Let's create a simple interceptor that logs the execution time of a call:
+
+```php
+namespace App\Interceptor;
 
 use Psr\Log\LoggerInterface;
-use Spiral\Core\CoreInterceptorInterface;
-use Spiral\Core\CoreInterface;
+use Spiral\Interceptors\Context\CallContextInterface;
+use Spiral\Interceptors\HandlerInterface;
+use Spiral\Interceptors\InterceptorInterface;
 
-class SlowQueryDetectorInterceptor implements CoreInterceptorInterface
+class ExecutionTimeInterceptor implements InterceptorInterface
 {
     public function __construct(
         private readonly LoggerInterface $logger
     ) {
     }
 
-    public function process(string $database, string $sql, array $parameters, CoreInterface $core): mixed
+    public function intercept(CallContextInterface $context, HandlerInterface $handler): mixed
     {
+        $target = $context->getTarget();
         $startTime = \microtime(true);
 
-        $result = $core->callAction($database, $sql, $parameters);
-        
-        $elapsed = \microtime(true) - $startTime;
+        try {
+            return $handler->handle($context);
+        } finally {
+            $executionTime = \microtime(true) - $startTime;
 
-        if ($elapsed > 0.1) {
-            $this->logger->warning(
-                'Slow query detected',
+            $this->logger->debug(
+                'Target executed',
                 [
-                    'database' => $database,
-                    'sql' => $sql,
-                    'parameters' => $parameters,
-                    'elapsed' => $elapsed
+                    'target' => (string)$target,
+                    'execution_time' => $executionTime,
                 ]
             );
+        }
+    }
+}
+```
+
+This interceptor:
+1. Records the start time
+2. Passes the call to the next handler in the chain
+3. Calculates and logs the execution time once the handler is complete
+
+## Building an Interceptor Pipeline
+
+To use interceptors, you need to build an interceptor pipeline using the `PipelineBuilderInterface`:
+
+```php
+use Spiral\Interceptors\PipelineBuilder;
+use Spiral\Interceptors\Context\CallContext;
+use Spiral\Interceptors\Context\Target;
+use Spiral\Interceptors\Handler\CallableHandler;
+use App\Interceptor\ExecutionTimeInterceptor;
+use App\Interceptor\AuthorizationInterceptor;
+
+// Create interceptors
+$interceptors = [
+    new ExecutionTimeInterceptor($logger),
+    new AuthorizationInterceptor($auth),
+];
+
+// Build the pipeline
+$pipeline = (new PipelineBuilder())
+    ->withInterceptors(...$interceptors)
+    ->build(new CallableHandler());
+
+// Create call context
+$context = new CallContext(
+    target: Target::fromPair(UserController::class, 'show'),
+    arguments: ['id' => 42],
+    attributes: ['request' => $request]
+);
+
+// Execute the pipeline
+$result = $pipeline->handle($context);
+```
+
+## Handlers
+
+The pipeline should end with a handler that executes the target. Spiral provides several built-in handlers:
+
+### CallableHandler
+
+The `CallableHandler` simply calls the target without any additional processing:
+
+```php
+use Spiral\Interceptors\Handler\CallableHandler;
+
+$handler = new CallableHandler();
+```
+
+### AutowireHandler
+
+The `AutowireHandler` resolves missing arguments using the container:
+
+```php
+use Spiral\Interceptors\Handler\AutowireHandler;
+
+$handler = new AutowireHandler($container);
+```
+
+This handler is useful when working with controllers where you want to automatically inject service dependencies.
+
+## Advanced Example
+
+Here's a more comprehensive example of using interceptors:
+
+```php
+namespace App\Controller;
+
+use App\Interceptor\AuthorizationInterceptor;
+use App\Interceptor\CacheInterceptor;
+use App\Interceptor\ExecutionTimeInterceptor;
+use App\User\UserService;
+use Psr\Container\ContainerInterface;
+use Spiral\Core\Attribute\Proxy;
+use Spiral\Core\CompatiblePipelineBuilder;
+use Spiral\Interceptors\Context\CallContext;
+use Spiral\Interceptors\Context\Target;
+use Spiral\Interceptors\Handler\AutowireHandler;
+
+class UserController
+{
+    private $pipeline;
+
+    public function __construct(
+        private readonly UserService $userService,
+        #[Proxy] ContainerInterface $container
+    ) {
+        // Build the pipeline with interceptors
+        $this->pipeline = (new CompatiblePipelineBuilder())
+            ->withInterceptors(
+                new ExecutionTimeInterceptor($container->get(LoggerInterface::class)),
+                new AuthorizationInterceptor($container->get(AuthInterface::class)),
+                new CacheInterceptor($container->get(CacheInterface::class))
+            )
+            ->build(new AutowireHandler($container));
+    }
+
+    public function show(int $id)
+    {
+        // Create a context for the target method
+        $context = new CallContext(
+            target: Target::fromReflectionMethod(
+                new \ReflectionMethod($this->userService, 'findUser'),
+                $this->userService
+            ),
+            arguments: ['id' => $id]
+        );
+
+        // Execute the pipeline
+        return $this->pipeline->handle($context);
+    }
+}
+```
+
+In this example:
+1. We build a pipeline with execution time logging, authorization checks, and result caching
+2. We use the `AutowireHandler` to resolve missing arguments from the container
+3. The controller method creates a context targeting the `findUser` method of the `UserService`
+4. The pipeline executes all interceptors and then calls the target method
+
+> **Note**
+> To learn about Container Scopes and Proxy objects, see the [IoC Scopes](../container/scopes.md) section in our documentation.
+
+## Comparison with Legacy Interceptors
+
+> **Note**
+> The old implementation of interceptors based on `spiral/hmvc` is no longer recommended.
+> You can find the old documentation at [https://spiral.dev/docs/framework-interceptors/3.13](https://spiral.dev/docs/framework-interceptors/3.13).
+
+In Spiral 3.14.0, a new implementation of interceptors was introduced in the `spiral/interceptors` package.
+Here's how the new implementation differs from the legacy one:
+
+:::: tabs
+
+::: tab Legacy Interceptors
+```php
+namespace App\Interceptor;
+
+use Psr\SimpleCache\CacheInterface;
+use Spiral\Core\CoreInterface;
+use Spiral\Core\CoreInterceptorInterface;
+
+class CacheInterceptor implements CoreInterceptorInterface
+{
+    public function __construct(
+        private readonly CacheInterface $cache,
+        private readonly int $ttl = 3600,
+    ) {}
+
+    public function process(string $controller, string $action, array $parameters, CoreInterface $core): mixed
+    {
+        // Step 1: Generate a cache key based on controller, action, and parameters
+        $cacheKey = $this->generateCacheKey($controller, $action, $parameters);
+
+        // Step 2: Check if the result is already cached
+        if ($this->cache->has($cacheKey)) {
+            // Return cached result if available
+            return $this->cache->get($cacheKey);
+        }
+
+        // Step 3: Execute the controller action if no cached result
+        $result = $core->callAction($controller, $action, $parameters);
+
+        // Step 4: Cache the result for future requests
+        if ($this->isCacheable($result)) {
+            $this->cache->set($cacheKey, $result, $this->ttl);
         }
 
         return $result;
     }
-}
-```
 
-Now we can register the `SlowQueryDetectorInterceptor` class with the `InterceptableCore` class and call
-the `callAction`
-method to handle the database query.
-
-```php
-use Spiral\Core\InterceptableCore;
-use App\Application\Database\DatabaseQueryCore;
-use Cycle\Database\DatabaseManager;
-
-$core = new InterceptableCore(
-  new DatabaseQueryCore(new DatabaseManager(...))
-);
-
-$core->addInterceptor(new SlowQueryDetectorInterceptor(new Logger(...)));
-
-// Execute a SELECT statement on the 'default' database
-$result = $core->callAction(
-  'default', 
-  'SELECT * FROM users WHERE id = ?', 
-  ['sql_parameters' => [1]]
-);
-```
-
-Now every time the `callAction` method is called, the `SlowQueryDetectorInterceptor` class will be called and will log
-slow queries.
-
-We can also add multiple interceptors to the `InterceptableCore` class. For example, we could create another one
-interceptor that handles Database exceptions and in some cases treies to reconnect to the database.
-
-```php app/src/Integration/Database/Interceptor/DatabaseConnectionInterceptor.php
-namespace App\Integration\Database\Interceptor;
-
-use Spiral\Core\CoreInterceptorInterface;
-use Spiral\Core\CoreInterface;
-use Cycle\Database\Exception\StatementException\ConnectionException;
-
-final class DatabaseConnectionInterceptor implements CoreInterceptorInterface
-{
-    // ...
-
-    public function process(string $database, string $sql, array $parameters, CoreInterface $core): mixed
+    private function generateCacheKey(string $controller, string $action, array $parameters): string
     {
-        try {
-            return $core->callAction($database, $sql, $parameters);
-        } catch (ConnectionException $e) {
-            // Try to reconnect...
+        // Create a deterministic cache key from controller, action, and parameters
+        return \md5($controller . '::' . $action . '::' . \serialize($parameters));
+    }
 
-            // For example, switch to another database...
-            return $this->process('slave', $sql, $parameters, $core);
-        }
+    private function isCacheable(mixed $result): bool
+    {
+        // Only cache serializable results
+        return !\is_resource($result) && (
+                \is_scalar($result) ||
+                \is_array($result) ||
+                $result instanceof \Serializable ||
+                $result instanceof \stdClass
+            );
     }
 }
 ```
+:::
 
-Don't forget to register the `DatabaseConnectionInterceptor` class with the `InterceptableCore` class.
-
+::: tab New Interceptors
 ```php
-$core->addInterceptor(new DatabaseConnectionInterceptor(...));
-$core->addInterceptor(new SlowQueryDetectorInterceptor(new Logger(...)));
-```
+namespace App\Interceptor;
 
-You can pass any parameters to the `callAction` method, that can be used by interceptors. For example:
+use Psr\SimpleCache\CacheInterface;
+use Spiral\Interceptors\Context\CallContextInterface;
+use Spiral\Interceptors\Context\TargetInterface;
+use Spiral\Interceptors\HandlerInterface;
+use Spiral\Interceptors\InterceptorInterface;
 
-```php
-public function process(string $database, string $sql, array $parameters, CoreInterface $core): mixed
+final class CacheInterceptor implements InterceptorInterface
 {
-    // $sql = SELECT * FROM users WHERE id = ?
-    $sql .= ' LIMIT ?';
-    
-    $parameters['sql_parameters'][] = 10;
-    
-    return $core->callAction($database, $sql, $parameters);
+    public function __construct(
+        private readonly CacheInterface $cache,
+        private readonly int $ttl = 3600,
+    ) {}
+
+    public function intercept(CallContextInterface $context, HandlerInterface $handler): mixed
+    {
+        // Step 1: Generate a cache key using target path and arguments
+        $cacheKey = $this->generateCacheKey($context->getTarget(), $context->getArguments());
+
+        // Step 2: Check if the result is already cached
+        if ($this->cache->has($cacheKey)) {
+            // Return cached result if available
+            return $this->cache->get($cacheKey);
+        }
+
+        // Step 3: Execute the target if no cached result
+        $result = $handler->handle($context);
+
+        // Step 4: Cache the result for future requests
+        if ($this->isCacheable($result)) {
+            $this->cache->set($cacheKey, $result, $this->ttl);
+        }
+
+        return $result;
+    }
+
+    private function generateCacheKey(TargetInterface $target, array $args): string
+    {
+        // Create a deterministic cache key from target string and arguments
+        return \md5((string) $target . '::' . serialize($args));
+    }
+
+    private function isCacheable(mixed $result): bool
+    {
+        // Only cache serializable results
+        return !\is_resource($result) && (
+                \is_scalar($result) ||
+                \is_array($result) ||
+                $result instanceof \Serializable ||
+                $result instanceof \stdClass
+            );
+    }
+}
+```
+:::
+
+::::
+
+### Interface Changes
+
+**Legacy Interface:**
+```php
+interface CoreInterceptorInterface
+{
+    public function process(string $controller, string $action, array $parameters, CoreInterface $core): mixed;
 }
 ```
 
-As you can see interceptors are a convenient way to intercept and modify the behavior of certain parts of the
-application, making it more functional and efficient, while keeping the domain specific logic clean and maintainable.
+**New Interface:**
+```php
+interface InterceptorInterface
+{
+    public function intercept(CallContextInterface $context, HandlerInterface $handler): mixed;
+}
+```
+
+The main differences:
+- The `$controller` and `$action` parameters have been replaced with a more flexible `Target` concept
+- The `$parameters` array is now part of the `CallContext`
+- Instead of a `CoreInterface`, there's a `HandlerInterface` which offers more flexibility
+
+### Compatibility
+
+In Spiral 3.x, both legacy interceptors (`CoreInterceptorInterface`) and new interceptors (`InterceptorInterface`) are supported.
+However, the legacy implementation is deprecated and will be excluded in Spiral 4.x.
+
+If you need to use both implementations together, use the `CompatiblePipelineBuilder`:
+
+```php
+use Spiral\Core\CompatiblePipelineBuilder;
+use Spiral\Core\CoreInterceptorInterface; // Legacy interceptor
+use Spiral\Interceptors\InterceptorInterface; // New interceptor
+
+$pipeline = (new CompatiblePipelineBuilder())
+    ->withInterceptors(
+        new LegacyStyleInterceptor(), // Implements CoreInterceptorInterface
+        new NewStyleInterceptor()     // Implements InterceptorInterface
+    )
+    ->build(new CallableHandler());
+```
+
+### Migration Guidelines
+
+When migrating from the legacy implementation:
+- Replace `CoreInterceptorInterface` with `InterceptorInterface`
+- Use a `Target` instead of `$controller` and `$action` parameters
+- Move `$parameters` to the `CallContext`
+- Replace `$core->callAction()` with `$handler->handle()`
 
 ## Events
 
-| Event                                | Description                                               |
-|--------------------------------------|-----------------------------------------------------------|
-| Spiral\Core\Event\InterceptorCalling | The Event will be fired `before` calling the interceptor. |
+| Event                                        | Description                                     |
+|----------------------------------------------|-------------------------------------------------|
+| Spiral\Interceptors\Event\InterceptorCalling | Fired before calling an interceptor.            |
+
+> **Warning**
+> The `Spiral\Core\Event\InterceptorCalling` event is only dispatched by the deprecated `\Spiral\Core\InterceptorPipeline` 
+> from the legacy implementation. The framework's new implementation does not use this event.
 
 > **Note**
 > To learn more about dispatching events, see the [Events](../advanced/events.md) section in our documentation.

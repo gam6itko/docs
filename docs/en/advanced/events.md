@@ -269,7 +269,7 @@ and `Spiral\Events\Processor\AttributeProcessor` from the config file.
 
 The Events component provides an ability to intercept events. This is useful when you need to modify the event data or,
 for example, send it via websockets. To do this, you need to create an interceptor class that implements
-the `Spiral\Core\CoreInterceptorInterface` interface.
+the `Spiral\Interceptors\InterceptorInterface` interface.
 
 **Example**
 
@@ -277,38 +277,39 @@ the `Spiral\Core\CoreInterceptorInterface` interface.
 namespace App\Broadcasting;
 
 use Spiral\Broadcasting\BroadcastInterface;
-use Spiral\Core\CoreInterceptorInterface;
-use Spiral\Core\CoreInterface;
+use Spiral\Interceptors\Context\CallContextInterface;
+use Spiral\Interceptors\HandlerInterface;
+use Spiral\Interceptors\InterceptorInterface;
 use Spiral\Queue\SerializerRegistryInterface;
 
-final class BroadcastEventInterceptor implements CoreInterceptorInterface
+final class BroadcastEventInterceptor implements InterceptorInterface
 {
     public function __construct(
         private readonly BroadcastInterface $broadcast,
-        private readonly SerializerRegistryInterface $registry
-    ) {
-    }
+        private readonly SerializerRegistryInterface $registry,
+    ) {}
 
-    public function process(string $controller, string $action, array $parameters, CoreInterface $core): mixed
+    public function intercept(CallContextInterface $context, HandlerInterface $handler): mixed
     {
-        $event = $parameters['event'];
-        
+        $event = $context->getArguments()['event'];
+
         // Dispatch event first
-        $result = $core->callAction($controller, $action, $parameters);
+        $result = $handler->handle($context);
 
         // Broadcast event after dispatch
         if ($event instanceof ShouldBroadcastInterface) {
             $this->broadcast->publish(
                 $event->getBroadcastTopics(),
                 $this->registry->getSerializer('json')->serialize(
-                    ['event' => $event->getEventName(), 'data' => $event->getPayload()]
-                )
+                    ['event' => $event->getEventName(), 'data' => $event->getPayload()],
+                ),
             );
         }
 
         return $result;
     }
 }
+
 ```
 
 And then you will need to register it in the `events.php` configuration file, which is located in the `app/config`

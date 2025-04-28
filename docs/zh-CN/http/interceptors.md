@@ -2,8 +2,6 @@
 
 Spiral 提供了用于 HTTP 请求的拦截器，允许你在请求生命周期的各个阶段拦截和修改请求和响应。
 
-`Spiral\Boot\CoreInterface` 接口通常在容器中绑定到 `Spiral\Core\Core` 类（默认情况）。 `Core` 类负责处理控制器，并且是应用程序的入口点。它负责解析控制器，处理请求并返回响应。 它还负责管理应用程序的生命周期，并跟踪当前的请求和响应。
-
 > **了解更多**
 > 可以在 [框架 — 拦截器](../framework/interceptors.md) 章节中阅读更多关于拦截器的信息。
 
@@ -37,7 +35,8 @@ class AppBootloader extends DomainBootloader
 
 ### Cycle 实体解析
 
-[Cycle Bridge](https://github.com/spiral/cycle-bridge/) 包提供了 `Spiral\Cycle\Interceptor\CycleInterceptor`。 使用 `CycleInterceptor` 根据参数值自动解析实体注入：
+[Cycle Bridge](https://github.com/spiral/cycle-bridge/) 包提供了 `Spiral\Cycle\Interceptor\CycleInterceptor`。
+使用 `CycleInterceptor` 根据参数值自动解析实体注入：
 
 要激活拦截器：
 
@@ -396,7 +395,7 @@ class UserGrid extends GridSchema
 
 ### Pipeline 拦截器
 
-此拦截器允许使用 `@Pipeline` 注解自定义端点拦截器。
+此拦截器允许使用 `Pipeline` 属性自定义端点拦截器。
 当在域核心拦截器列表中声明时，此拦截器将指定注解的拦截器注入到声明 `PipelineInterceptor` 的位置。
 
 ```php app/src/Application/Bootloader/DomainBootloader.php
@@ -492,89 +491,105 @@ class AppBootloader extends DomainBootloader
 }
 ```
 
-## 特定于路由的核心
+## 特定路由的拦截器
 
-要为特定路由激活一个核心，你可以创建 `InterceptableCore` 类的新实例，并将原始的核心实例作为参数传递。 然后你可以使用 `addInterceptor(` 方法注册特定于路由的拦截器。
+要为特定路由激活拦截器管道，你可以使用 `Spiral\Interceptors\PipelineBuilder` 类构建管道，并使用 `withHandler()` 方法将其注册到路由中。
 
 ```php
-$customCore = new InterceptableCore($core);
-$customCore->addInterceptor(new CustomInterceptor());
+// 为特定路由创建管道
+$pipeline = (new PipelineBuilder())
+    ->withInterceptors(new CustomInterceptor())
+    ->build(new CallableHandler());
 
+// 使用自定义管道注册路由
 $router->setRoute(
     'home',
     new Route(
         '/home/<action>',
-        (new Controller(HomeController::class))->withCore($customCore)
+        (new Controller(HomeController::class))->withHandler($pipeline)
     )
 );
 ```
 
-## 路由参数类型转换
+## 参数类型转换
 
 ### 整型值转换
 
-如果你想在控制器中使用类型化的路由参数注入，例如 `function user(int $id)`，你需要自己进行值转换。 你可以为此使用域拦截器。
-
-你可以在下面看到一个简单拦截器的示例：
+如果你想在控制器中使用类型化的路由参数注入，例如 `function user(int $id)`，你需要创建一个拦截器来处理类型转换：
 
 ```php
-class StringToIntParametersInterceptor implements CoreInterceptorInterface
+namespace App\Interceptor;
+
+use Spiral\Interceptors\Context\CallContextInterface;
+use Spiral\Interceptors\HandlerInterface;
+use Spiral\Interceptors\InterceptorInterface;
+
+/**
+ * 将所有数字字符串参数转换为整数。
+ */
+class ParameterTypeCastInterceptor implements InterceptorInterface
 {
-    public function process(string $controller, string $action, array $parameters, CoreInterface $core): mixed
+    public function intercept(CallContextInterface $context, HandlerInterface $handler): mixed
     {
-        foreach ($parameters as $key => $parameter) {
-            if (ctype_digit($parameter)) {
-                $parameters[$key] = (int)$parameter;
+        $arguments = $context->getArguments();
+
+        foreach ($arguments as $key => $value) {
+            if (\is_string($value) && \ctype_digit($value)) {
+                $arguments[$key] = (int) $value;
             }
         }
 
-        return $core->callAction($controller, $action, $parameters);
+        return $handler->handle($context->withArguments($arguments));
     }
 }
 ```
 
 ### 值对象转换
 
-你可以使用相同的方法将值转换为值对象。
-
-例如，如果控制器操作期望 `Ramsey\Uuid\Uuid` 对象
-
-```php app/src/Endpoint/Web/UsersController.php
-use Ramsey\Uuid\UuidInterface;
-
-class UserController 
-{
-    public function user(UuidInterface $uuid): User
-    {
-        // ...
-    }
-}
-```
-
-你可以使用以下拦截器自动将字符串值转换为 `Ramsey\Uuid\Uuid` 对象：
+对于处理复杂类型转换，例如将字符串 UUID 转换为 UUID 对象：
 
 ```php
-use Spiral\Core\CoreInterceptorInterface;
-use Spiral\Core\CoreInterface;
-use Ramsey\Uuid\UuidInterface;
+namespace App\Interceptor;
+
 use Ramsey\Uuid\Uuid;
+use Ramsey\Uuid\UuidInterface;
+use Spiral\Interceptors\Context\CallContextInterface;
+use Spiral\Interceptors\HandlerInterface;
+use Spiral\Interceptors\InterceptorInterface;
 
-final class UuidParametersConverterInterceptor implements CoreInterceptorInterface
+final class UuidParameterConverterInterceptor implements InterceptorInterface
 {
-    public function process(string $controller, string $action, array $parameters, CoreInterface $core): mixed
+    public function intercept(CallContextInterface $context, HandlerInterface $handler): mixed
     {
-        $refMethod = new \ReflectionMethod($controller, $action);
+        $arguments = $context->getArguments();
+        $target = $context->getTarget();
+        $reflection = $target->getReflection();
 
-        // Iterate all Controller action arguments
-        foreach ($refMethod->getParameters() as $parameter) {
-            // If an arguments has Ramsey\Uuid\UuidInterface type hint.
-            if ($parameter->getType()->getName() === UuidInterface::class) {
-                // Replace argument value with Uuid instance.
-                $parameters[$parameter->getName()] = Uuid::fromString($parameters[$parameter->getName()]);
+        if ($reflection === null) {
+            // 如果反射不可用，直接调用处理程序
+            return $handler->handle($context);
+        }
+
+        // 遍历所有操作参数
+        foreach ($reflection->getParameters() as $parameter) {
+            $paramName = $parameter->getName();
+            $paramType = $parameter->getType();
+
+            // 如果参数存在于参数列表中并且具有 UuidInterface 类型提示
+            if (isset($arguments[$paramName]) &&
+                $paramType !== null &&
+                $paramType->getName() === UuidInterface::class
+            ) {
+                try {
+                    // 用 Uuid 实例替换参数值
+                    $arguments[$paramName] = Uuid::fromString($arguments[$paramName]);
+                } catch (\Throwable $e) {
+                    // 如果需要，处理无效的 UUID 格式
+                }
             }
         }
 
-        return $core->callAction($controller, $action, $parameters);
+        return $handler->handle($context->withArguments($arguments));
     }
 }
 ```

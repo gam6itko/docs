@@ -167,8 +167,8 @@ final class GuardedInterceptor implements InterceptorInterface
         
         if ($reflection !== null) {
             $attribute = $this->reader->firstFunctionMetadata($reflection, Guarded::class);
-
-        if ($attribute !== null) {
+            
+            if ($attribute !== null) {
                 $ctx = $context->getArguments()[0] ?? null;
                 if ($ctx instanceof ContextInterface) {
                     $this->checkAuth($attribute, $ctx);
@@ -221,9 +221,9 @@ class Guarded
 }
 ```
 
-### Registering Interceptors
+### Registering Server Interceptors
 
-To use this interceptor, you will need to register them in the configuration file `app/config/grpc.php`.
+To use server interceptors, register them in the configuration file `app/config/grpc.php`:
 
 ```php app/config/grpc.php
 return [    
@@ -237,199 +237,224 @@ return [
 
 ## Client Interceptors
 
-Client interceptors are used to intercept and modify requests and responses sent by a client. They are typically used to
-add cross-cutting functionality such as logging, modifying header, handling response errors.
-
-### Interceptable Client class
-
-If you want to use client interceptors, you will need to modify a client class from [client SDK](./client.md) section.
+Client interceptors allow you to modify or extend the behavior of gRPC client requests.
+They can add functionality such as logging, timeout configuration, retries, and authentication.
 
 > **See more**
-> Read more about interceptors in the [Framework — Interceptors](../framework/interceptors.md) section.
+> See the [Client](./client.md) documentation for basic gRPC client configuration and usage.
 
-```php app/src/Application/Bootloader/AppBootloader.php
-namespace App\Application\Bootloader;
+### Built-in Client Interceptors
 
-use App\Service\PingerClient;
-use App\Service\RequestCore;
-use GRPC\Pinger\PingerInterface;
-use Spiral\Boot\Bootloader\Bootloader;
-use Spiral\Boot\EnvironmentInterface;
-use Spiral\Core\InterceptableCore;
+Spiral provides several built-in client interceptors through the `spiral/grpc-client` package:
 
-final class AppBootloader extends Bootloader
-{
-    protected const SINGLETONS = [
-        PingerInterface::class => [self::class, 'initPingService'],
-    ];
+#### SetTimeoutInterceptor
 
-    private function initPingService(
-        EnvironmentInterface $env
-    ): PingServiceInterface
-    {
-        $core = new InterceptableCore(
-            new RequestCore(
-                $env->get('PING_SERVICE_HOST', '127.0.0.1:9001'),
-                ['credentials' => \Grpc\ChannelCredentials::createInsecure()]
-            )
-        );
-
-        // Here you can register your interceptors
-        $core->addInterceptor(new \App\Service\Interceptor\HandleResponseErrorsInterceptor());
-
-        return new PingerClient($core);
-    }
-}
-```
-
-And then implement the `RequestCore` class:
+Sets a timeout for each gRPC request in milliseconds:
 
 ```php
-namespace App\Service;
+use Spiral\Grpc\Client\Interceptor\SetTimoutInterceptor;
 
-use Spiral\Core\CoreInterface;
-use Spiral\RoadRunner\GRPC\ContextInterface;
-
-final class RequestCore extends \Grpc\BaseStub implements CoreInterface
-{
-    public function callAction(string $controller, string $action, array $parameters = []): mixed
-    {
-        $ctx = $parameters['ctx'];
-        \assert($ctx instanceof ContextInterface);
-
-        return $this->_simpleRequest(
-            $action,
-            $parameters['in'],
-            [$parameters['responseClass'], 'decode'],
-            (array) $ctx->getValue('metadata'),
-            (array) $ctx->getValue('options')
-        )->wait();
-    }
-}
+// Adds a 5-second timeout
+SetTimoutInterceptor::createConfig(5_000)
 ```
 
-And finally modify the `PingerClient` class:
+#### RetryInterceptor
+
+Implements retry logic with exponential backoff for failed requests:
 
 ```php
-namespace App\Service;
+use Spiral\Grpc\Client\Interceptor\RetryInterceptor;
 
-use App\GRPC\Pinger;
-use Spiral\Core\CoreInterface;
-use Spiral\RoadRunner\GRPC;
+// Configure retries with custom parameters
+RetryInterceptor::createConfig(
+     // Initial backoff interval in milliseconds (default: 50ms)
+    initialInterval: 50,
+     // Initial interval for resource exhaustion issues (default: 1000ms)
+    congestionInitialInterval: 1000,
+     // The coefficient for calculating next retry backoff (default: 2.0)
+    backoffCoefficient: 2.0,
+     // Maximum backoff interval (default: 100x of initialInterval)
+    maximumInterval: null,
+     // Maximum number of retry attempts (default: 0 means unlimited)
+    maximumAttempts: 3,
+     // Maximum jitter to apply to intervals (default: 0.1)
+    maximumJitterCoefficient: 0.1,
+)
+```
 
-final class PingerClient implements Pinger\PingerInterface
+The `RetryInterceptor` automatically retries requests that fail with one of these status codes:
+- `ResourceExhausted`
+- `Unavailable`
+- `Unknown`
+- `Aborted`
+
+#### ConnectionsRotationInterceptor
+
+Rotates through multiple connections until the first successful response:
+
+```php
+use Spiral\Grpc\Client\Interceptor\ConnectionsRotationInterceptor;
+
+// Simply add the interceptor class
+ConnectionsRotationInterceptor::class
+```
+
+#### ExecuteServiceInterceptors
+
+This special interceptor calls service-specific interceptors defined in the service configuration.
+If the `ExecuteServiceInterceptors` interceptor is not included in the global interceptors list, service-specific interceptors will not be executed.
+
+```php
+use Spiral\Grpc\Client\Interceptor\ExecuteServiceInterceptors;
+
+// Required to execute service-specific interceptors
+ExecuteServiceInterceptors::class
+```
+
+### Working with gRPC Context Fields
+
+When writing custom client interceptors, you'll often need to access or modify elements of the gRPC request context.
+The `Spiral\Grpc\Client\Interceptor\Helper` class provides methods to safely work with these context fields:
+
+```php
+use Spiral\Grpc\Client\Interceptor\Helper;
+use Spiral\Interceptors\Context\CallContextInterface;
+use Spiral\Interceptors\HandlerInterface;
+use Spiral\Interceptors\InterceptorInterface;
+
+final class AuthInterceptor implements InterceptorInterface
 {
     public function __construct(
-        private readonly RequestCore $core
-    ) {
-    }
+        private readonly string $authToken,
+    ) {}
 
-    public function ping(GRPC\ContextInterface $ctx, Pinger\PingRequest $in): Pinger\PingResponse
+    public function intercept(CallContextInterface $context, HandlerInterface $handler): mixed
     {
-        return $this->sendRequest(
-            '/' . self::NAME . '/ping',
-            $in,
-            $ctx,
-            Pinger\PingResponse::class
-        );
-    }
+        // Get current metadata
+        $metadata = Helper::getMetadata($context);
 
-    /**
-     * @template T of object
-     * @param non-empty-string $method
-     * @param class-string<T> $response
-     * @return T
-     */
-    public function sendRequest(
-        string $method,
-        \GRPC\Ping\PingRequest $in,
-        GRPC\ContextInterface $ctx,
-        string $response
-    ): object {
-        [$response, $status] = $this->core->callAction(
-            self::class, $method,
-            [
-                'responseClass' => $response,
-                'ctx' => $ctx,
-                'in' => $in,
-            ]
-        );
+        // Add authentication token to metadata
+        $metadata['auth-token'] = [$this->authToken];
 
-        return $response;
+        // Update context with new metadata
+        $context = Helper::withMetadata($context, $metadata);
+
+        // Continue the request pipeline
+        return $handler->handle($context);
     }
 }
 ```
 
-### Handle Response Errors Interceptor
+The `Helper` class provides the following methods:
+- `getConnections()`/`withConnections()` - Get/set available connections
+- `getCurrentConnection()`/`withCurrentConnection()` - Get/set current connection
+- `getMessage()`/`withMessage()` - Get/set request message
+- `getMetadata()`/`withMetadata()` - Get/set request metadata
+- `getReturnType()`/`withReturnType()` - Get/set expected response type
+- `getOptions()`/`withOptions()` - Get/set request options
+
+### Custom Client Interceptor Example: Telemetry
+
+Here's an example of a custom client interceptor that injects telemetry data into the request:
 
 ```php
-namespace App\Service\Interceptor;
-
-use Spiral\Core\CoreInterceptorInterface;
-use Spiral\Core\CoreInterface;
-use Spiral\RoadRunner\GRPC;
-
-final class HandleResponseErrorsInterceptor implements CoreInterceptorInterface
-{
-    public function process(string $controller, string $action, array $parameters, CoreInterface $core): mixed
-    {
-        [$response, $status] = $core->callAction($controller, $action, $parameters);
-
-        $code = $status->code ?? GRPC\StatusCode::UNKNOWN;
-
-        if ($code !== GRPC\StatusCode::OK) {
-            throw new GRPC\Exception\GRPCException(
-                message: $status->details,
-                code: $status->code
-            );
-        }
-
-        return [$response, $code];
-    }
-}
-```
-
-### Passing telemetry trace ID to the context
-
-```php
-namespace App\Service\Interceptor;
-
-use Psr\Container\ContainerInterface;
-use Spiral\Core\CoreInterceptorInterface;
-use Spiral\RoadRunner\GRPC\ContextInterface;
-use Spiral\RoadRunner\GRPC\ResponseHeaders;
+use Spiral\Grpc\Client\Interceptor\Helper;
+use Spiral\Interceptors\Context\CallContextInterface;
+use Spiral\Interceptors\HandlerInterface;
+use Spiral\Interceptors\InterceptorInterface;
 use Spiral\Telemetry\TraceKind;
 use Spiral\Telemetry\TracerInterface;
-use Spiral\Core\CoreInterface;
 
-class InjectTelemetryIntoContextInterceptor implements CoreInterceptorInterface
+final class TelemetryInterceptor implements InterceptorInterface
 {
     public function __construct(
-        private readonly ContainerInterface $container
-    ) {
-    }
+        private readonly TracerInterface $tracer,
+    ) {}
 
-    public function process(string $controller, string $action, array $parameters, CoreInterface $core): mixed
+    public function intercept(CallContextInterface $context, HandlerInterface $handler): mixed
     {
-        $tracer = $this->container->get(TracerInterface::class);
-        \assert($tracer instanceof TracerInterface);
+        // Get the current metadata
+        $metadata = Helper::getMetadata($context);
 
-        if (isset($parameters['ctx']) and $parameters['ctx'] instanceof RequestContext) {
-            $metadata = $parameters['ctx']->getValue('metadata');
-            if(!\is_array($metadata)) {
-                $metadata = [];
-        }
+        // Add trace context to metadata
+        $metadata['telemetry-trace-id'] = $this->tracer->getContext();
 
-            $metadata['telemetry-trace-id'] = $tracer->getContext();
-            $parameters['ctx'] = $parameters['ctx']->withValue('metadata', $metadata);
-        }
+        // Update context with new metadata
+        $context = Helper::withMetadata($context, $metadata);
 
-        return $tracer->trace(
-            name: \sprintf('GRPC request %s', $action),
-            callback: static fn() => $core->callAction($controller, $action, $parameters),
-            attributes: compact('controller', 'action'),
-            traceKind: TraceKind::PRODUCER
+        // Trace the gRPC call
+        $target = $context->getTarget();
+
+        return $this->tracer->trace(
+            name: \sprintf('GRPC client request %s', (string) $target),
+            callback: static fn(): mixed => $handler->handle($context),
+            attributes: [
+                'target' => (string) $target,
+                'path' => $target->getPath(),
+            ],
+            traceKind: TraceKind::PRODUCER,
         );
     }
 }
+```
+
+### Order of Interceptors
+
+The order of interceptors matters. Interceptors are executed in the order they are defined in the configuration.
+For example:
+
+```php
+[
+    SetTimoutInterceptor::createConfig(10_000), // 10 second global timeout
+    RetryInterceptor::createConfig(maxAttempts: 3), // Up to 3 retries
+    SetTimoutInterceptor::createConfig(3_000), // 3 second per-attempt timeout
+]
+```
+
+In this configuration:
+1. A 10-second global timeout is set for the entire request (including all retries)
+2. The retry interceptor will make up to 3 retry attempts if needed
+3. Each individual attempt has a 3-second timeout
+
+The `ExecuteServiceInterceptors` interceptor should typically be placed last in the global interceptors list to ensure that service-specific interceptors run after global ones.
+
+### Configuring Client Interceptors
+
+For detailed information on configuring the gRPC client and its interceptors, see the [Client](./client.md) documentation. Below is a basic example:
+
+```php app/config/grpc.php
+use App\GRPC\Interceptor\TelemetryInterceptor;
+use Spiral\Grpc\Client\Config\GrpcClientConfig;
+use Spiral\Grpc\Client\Config\ServiceConfig;
+use Spiral\Grpc\Client\Config\ConnectionConfig;
+use Spiral\Grpc\Client\Interceptor\SetTimoutInterceptor;
+use Spiral\Grpc\Client\Interceptor\RetryInterceptor;
+use Spiral\Grpc\Client\Interceptor\ExecuteServiceInterceptors;
+
+return [
+    // ... server configuration ...
+    
+    'client' => new GrpcClientConfig(
+        interceptors: [
+            // Global interceptors
+            TelemetryInterceptor::class,
+            SetTimoutInterceptor::createConfig(5_000),
+            RetryInterceptor::createConfig(maximumAttempts: 3),
+            // Calls service-specific interceptors
+            ExecuteServiceInterceptors::class,
+        ],
+        services: [
+            new ServiceConfig(
+                connections: ConnectionConfig::createInsecure('localhost:9001'),
+                interfaces: [
+                    \GRPC\MyService\ServiceInterface::class,
+                ],
+                // Service-specific interceptors
+                interceptors: [
+                    SetTimoutInterceptor::createConfig(2_000), // Override timeout for this service
+                ],
+            ),
+        ],
+    )
+];
 ```

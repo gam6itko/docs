@@ -1,48 +1,51 @@
 # GRPC — 拦截器
 
-Spiral 提供了 gRPC 服务的拦截器，允许你在请求生命周期的不同阶段拦截和修改请求与响应。
+Spiral 为 gRPC 服务提供了拦截器，允许您在请求生命周期的各个阶段拦截和修改请求和响应。
 
-> **另请参阅**
-> 在 [框架 — 拦截器](../framework/interceptors.md) 部分阅读更多关于拦截器的信息。
+> **查看更多**
+> 在 [Framework — 拦截器](../framework/interceptors.md) 部分阅读更多关于拦截器的信息。
 
-有两种类型的拦截器：
+拦截器分为两种类型：
 
-1.  服务器拦截器
-2.  客户端拦截器
+1. 服务器拦截器
+2. 客户端拦截器
 
 ## 服务器拦截器
 
-服务器拦截器用于拦截和修改服务器接收到的请求和响应。它们通常用于添加跨切功能，例如日志记录、身份验证或服务器监控。
+服务器拦截器用于拦截和修改服务器接收的请求和响应。它们通常用于为服务器添加横切功能，如日志记录、身份验证或监控。
 
-### 日志记录拦截器
+### 日志拦截器
 
-下面是一个在处理请求前后记录请求的简单拦截器示例：
+以下是一个简单拦截器的示例，它在处理前后记录请求：
 
 ```php
 namespace App\Endpoint\GRPC\Interceptor;
 
-use Spiral\Core\CoreInterceptorInterface;
-use Spiral\Core\CoreInterface;
+use Psr\Log\LoggerInterface;
+use Spiral\Interceptors\Context\CallContextInterface;
+use Spiral\Interceptors\HandlerInterface;
+use Spiral\Interceptors\InterceptorInterface;
 
-final class LogInterceptor implements CoreInterceptorInterface
+final class LogInterceptor implements InterceptorInterface
 {
     public function __construct(
-        private readonly \Psr\Log\LoggerInterface $core,
-    ) {
-    }
-    
-    public function process(string $name, string $action, array $parameters, CoreInterface $core): string
+        private readonly LoggerInterface $logger,
+    ) {}
+
+    public function intercept(CallContextInterface $context, HandlerInterface $handler): mixed
     {
+        $target = $context->getTarget();
+
         $this->logger->info('Request received...', [
-            'name' => $name,
-            'action' => $action,
+            'target' => (string) $target,
+            'path' => $target->getPath(),
         ]);
-        
-        $response = $core->callAction($name, $action, $parameters);
-        
+
+        $response = $handler->handle($context);
+
         $this->logger->info('Request processed', [
-            'name' => $name,
-            'action' => $action,
+            'target' => (string)$target,
+            'path' => $target->getPath(),
         ]);
 
         return $response;
@@ -52,28 +55,28 @@ final class LogInterceptor implements CoreInterceptorInterface
 
 ### 异常处理拦截器
 
-下面是一个处理服务器抛出异常的简单拦截器示例。它将捕获所有异常并将它们转换为 gRPC 异常。
+以下是一个简单拦截器的示例，它处理服务器抛出的异常。它会捕获所有异常并将其转换为 gRPC 异常。
 
 ```php
 namespace App\Endpoint\GRPC\Interceptor;
 
-use Spiral\Core\CoreInterceptorInterface;
-use Spiral\Core\CoreInterface;
 use Spiral\Exceptions\ExceptionReporterInterface;
+use Spiral\Interceptors\Context\CallContextInterface;
+use Spiral\Interceptors\HandlerInterface;
+use Spiral\Interceptors\InterceptorInterface;
 use Spiral\RoadRunner\GRPC\Exception\GRPCException;
 use Spiral\RoadRunner\GRPC\Exception\GRPCExceptionInterface;
 
-final class ExceptionHandlerInterceptor implements CoreInterceptorInterface
+final class ExceptionHandlerInterceptor implements InterceptorInterface
 {
     public function __construct(
-        private readonly ExceptionReporterInterface $reporter
-    ) {
-    }
+        private readonly ExceptionReporterInterface $reporter,
+    ) {}
 
-    public function process(string $controller, string $action, array $parameters, CoreInterface $core): mixed
+    public function intercept(CallContextInterface $context, HandlerInterface $handler): mixed
     {
         try {
-            return $core->callAction($controller, $action, $parameters);
+            return $handler->handle($context);
         } catch (\Throwable $e) {
             $this->reporter->report($e);
 
@@ -83,92 +86,101 @@ final class ExceptionHandlerInterceptor implements CoreInterceptorInterface
 
             throw new GRPCException(
                 message: $e->getMessage(),
-                previous: $e
+                previous: $e,
             );
         }
     }
 }
 ```
 
-### 从请求中接收跟踪上下文
+### 从请求接收跟踪上下文
 
-下面是一个从请求中接收跟踪上下文的简单拦截器示例。
+以下是一个简单拦截器的示例，从请求接收跟踪上下文。
 
 ```php
 namespace App\Endpoint\GRPC\Interceptor;
 
-use Spiral\Core\CoreInterceptorInterface;
+use Spiral\Interceptors\Context\CallContextInterface;
+use Spiral\Interceptors\HandlerInterface;
+use Spiral\Interceptors\InterceptorInterface;
 use Spiral\Telemetry\TraceKind;
 use Spiral\Telemetry\TracerFactoryInterface;
-use Spiral\Core\CoreInterface;
 
-class InjectTelemetryFromContextInterceptor implements CoreInterceptorInterface
+class InjectTelemetryFromContextInterceptor implements InterceptorInterface
 {
     public function __construct(
-        private readonly TracerFactoryInterface $tracerFactory
-    ) {
-    }
+        private readonly TracerFactoryInterface $tracerFactory,
+    ) {}
 
-    public function process(string $controller, string $action, array $parameters, CoreInterface $core): mixed
+    public function intercept(CallContextInterface $context, HandlerInterface $handler): mixed
     {
-        $traceContext = [];
+        $ctx = $context->getArguments()[0] ?? null;
 
-        if (isset($parameters['ctx']) and $parameters['ctx'] instanceof RequestContext) {
-            $traceContext = $parameters['ctx']->getValue('telemetry-trace-id') ?? [];
-        }
+        $traceContext = $ctx instanceof \Spiral\RoadRunner\GRPC\ContextInterface
+            ? (array) $ctx->getValue('telemetry-trace-id')
+            : [];
+
+        $target = $context->getTarget();
 
         return $this->tracerFactory->make($traceContext)->trace(
             name: \sprintf('Interceptor [%s]', __CLASS__),
-            callback: static fn(): mixed => $core->callAction($controller, $action, $parameters),
+            callback: static fn(): mixed => $handler->handle($context),
             attributes: [
-                'controller' => $controller,
-                'action' => $action,
+                'target' => (string) $target,
+                'path' => $target->getPath(),
             ],
             scoped: true,
-            traceKind: TraceKind::SERVER
+            traceKind: TraceKind::SERVER,
         );
     }
 }
 ```
 
-### 保护拦截器
+### 守卫拦截器
 
-下面是一个检查用户是否已通过身份验证的简单拦截器示例。它将使用 PHP 属性来确定哪些方法需要身份验证。身份验证令牌将通过请求元数据传递。
+以下是一个简单拦截器的示例，它检查用户是否已认证。它将使用 PHP 属性确定哪些方法需要认证。认证令牌在请求元数据中传递。
 
 ```php
 namespace App\Endpoint\GRPC\Interceptor;
 
 use App\Attribute\Guarded;
 use Spiral\Attributes\ReaderInterface;
-use Spiral\Core\CoreInterceptorInterface;
-use Spiral\Core\CoreInterface;
+use Spiral\Interceptors\Context\CallContextInterface;
+use Spiral\Interceptors\HandlerInterface;
+use Spiral\Interceptors\InterceptorInterface;
 use Spiral\RoadRunner\GRPC\ContextInterface;
 
-final class GuardedInterceptor implements CoreInterceptorInterface
+final class GuardedInterceptor implements InterceptorInterface
 {
     public function __construct(
         private readonly ReaderInterface $reader
     ) {
     }
 
-    public function process(string $class, string $method, array $parameters, CoreInterface $core): mixed
+    public function intercept(CallContextInterface $context, HandlerInterface $handler): mixed
     {
-        $reflMethod = new \ReflectionMethod($class, $method);
-        $attribute = $this->reader->firstFunctionMetadata($reflMethod, Guarded::class);
-
-        if ($attribute !== null) {
-            $this->checkAuth($attribute, $parameters['ctx']);
+        $reflection = $context->getTarget()->getReflection();
+        
+        if ($reflection !== null) {
+            $attribute = $this->reader->firstFunctionMetadata($reflection, Guarded::class);
+            
+            if ($attribute !== null) {
+                $ctx = $context->getArguments()[0] ?? null;
+                if ($ctx instanceof ContextInterface) {
+                    $this->checkAuth($attribute, $ctx);
+                }
+            }
         }
 
-        return $core->callAction($class, $method, $parameters);
+        return $handler->handle($context);
     }
 
     private function checkAuth(Guarded $attribute, ContextInterface $ctx): void
     {
-        // Metadata always stores values as array. 
+        // 元数据始终将值存储为数组
         $token = $ctx->getValue($attribute->tokenField)[0] ?? null;
 
-        // Here you can implement your own authentication logic
+        // 这里可以实现您自己的认证逻辑
         if ($token !== 'secret') {
             throw new \Exception('Unauthorized.');
         }
@@ -176,7 +188,7 @@ final class GuardedInterceptor implements CoreInterceptorInterface
 }
 ```
 
-一个需要身份验证的方法的示例：
+需要认证的方法示例：
 
 ```php
 use App\Attribute\Guarded;
@@ -188,7 +200,7 @@ public function ping(GRPC\ContextInterface $ctx, PingRequest $in): PingResponse
 }
 ````
 
-以及 Guarded 属性的示例：
+Guarded 属性示例：
 
 ```php
 namespace App\Attribute;
@@ -205,9 +217,9 @@ class Guarded
 }
 ```
 
-### 注册拦截器
+### 注册服务器拦截器
 
-要使用此拦截器，你需要在配置文件 `app/config/grpc.php` 中注册它们。
+要使用服务器拦截器，请在配置文件 `app/config/grpc.php` 中注册它们：
 
 ```php app/config/grpc.php
 return [    
@@ -221,198 +233,224 @@ return [
 
 ## 客户端拦截器
 
-客户端拦截器用于拦截和修改由客户端发送的请求和响应。它们通常用于添加跨切功能，例如日志记录、修改标头、处理响应错误。
+客户端拦截器允许您修改或扩展 gRPC 客户端请求的行为。
+它们可以添加日志记录、超时配置、重试和认证等功能。
 
-### 可拦截的客户端类
+> **查看更多**
+> 有关 gRPC 客户端配置和使用的基本信息，请参阅 [客户端](./client.md) 文档。
 
-如果想使用客户端拦截器，你将需要修改 [客户端 SDK](./client.md) 部分中的客户端类。
+### 内置客户端拦截器
 
-> **另请参阅**
-> 在 [框架 — 拦截器](../framework/interceptors.md) 部分阅读更多关于拦截器的信息。
+Spiral 通过 `spiral/grpc-client` 包提供了几个内置的客户端拦截器：
 
-```php app/src/Application/Bootloader/AppBootloader.php
-namespace App\Application\Bootloader;
+#### SetTimeoutInterceptor
 
-use App\Service\PingerClient;
-use App\Service\RequestCore;
-use GRPC\Pinger\PingerInterface;
-use Spiral\Boot\Bootloader\Bootloader;
-use Spiral\Boot\EnvironmentInterface;
-use Spiral\Core\InterceptableCore;
-
-final class AppBootloader extends Bootloader
-{
-    protected const SINGLETONS = [
-        PingerInterface::class => [self::class, 'initPingService'],
-    ];
-
-    private function initPingService(
-        EnvironmentInterface $env
-    ): PingServiceInterface
-    {
-        $core = new InterceptableCore(
-            new RequestCore(
-                $env->get('PING_SERVICE_HOST', '127.0.0.1:9001'),
-                ['credentials' => \Grpc\ChannelCredentials::createInsecure()]
-            )
-        );
-
-        // Here you can register your interceptors
-        $core->addInterceptor(new \App\Service\Interceptor\HandleResponseErrorsInterceptor());
-
-        return new PingerClient($core);
-    }
-}
-```
-
-然后实现 `RequestCore` 类：
+为每个 gRPC 请求设置超时时间（毫秒）：
 
 ```php
-namespace App\Service;
+use Spiral\Grpc\Client\Interceptor\SetTimoutInterceptor;
 
-use Spiral\Core\CoreInterface;
-use Spiral\RoadRunner\GRPC\ContextInterface;
-
-final class RequestCore extends \Grpc\BaseStub implements CoreInterface
-{
-    public function callAction(string $controller, string $action, array $parameters = []): mixed
-    {
-        $ctx = $parameters['ctx'];
-        \assert($ctx instanceof ContextInterface);
-
-        return $this->_simpleRequest(
-            $action,
-            $parameters['in'],
-            [$parameters['responseClass'], 'decode'],
-            (array) $ctx->getValue('metadata'),
-            (array) $ctx->getValue('options')
-        )->wait();
-    }
-}
+// 添加 5 秒超时
+SetTimoutInterceptor::createConfig(5_000)
 ```
 
-最后修改 `PingerClient` 类：
+#### RetryInterceptor
+
+使用指数退避算法为失败的请求实现重试逻辑：
 
 ```php
-namespace App\Service;
+use Spiral\Grpc\Client\Interceptor\RetryInterceptor;
 
-use App\GRPC\Pinger;
-use Spiral\Core\CoreInterface;
-use Spiral\RoadRunner\GRPC;
+// 配置具有自定义参数的重试
+RetryInterceptor::createConfig(
+     // 初始退避间隔（毫秒）（默认：50ms）
+    initialInterval: 50,
+     // 资源耗尽问题的初始间隔（默认：1000ms）
+    congestionInitialInterval: 1000,
+     // 计算下一次重试退避的系数（默认：2.0）
+    backoffCoefficient: 2.0,
+     // 最大退避间隔（默认：initialInterval 的 100 倍）
+    maximumInterval: null,
+     // 最大重试次数（默认：0 表示无限制）
+    maximumAttempts: 3,
+     // 应用于间隔的最大抖动（默认：0.1）
+    maximumJitterCoefficient: 0.1,
+)
+```
 
-final class PingerClient implements Pinger\PingerInterface
+`RetryInterceptor` 会自动重试因以下状态码失败的请求：
+- `ResourceExhausted`
+- `Unavailable`
+- `Unknown`
+- `Aborted`
+
+#### ConnectionsRotationInterceptor
+
+轮换多个连接直到第一个成功响应：
+
+```php
+use Spiral\Grpc\Client\Interceptor\ConnectionsRotationInterceptor;
+
+// 只需添加拦截器类
+ConnectionsRotationInterceptor::class
+```
+
+#### ExecuteServiceInterceptors
+
+这个特殊的拦截器调用在服务配置中定义的特定于服务的拦截器。
+如果全局拦截器列表中不包含 `ExecuteServiceInterceptors` 拦截器，则不会执行特定于服务的拦截器。
+
+```php
+use Spiral\Grpc\Client\Interceptor\ExecuteServiceInterceptors;
+
+// 需要执行特定于服务的拦截器
+ExecuteServiceInterceptors::class
+```
+
+### 使用 gRPC 上下文字段
+
+编写自定义客户端拦截器时，您经常需要访问或修改 gRPC 请求上下文的元素。
+`Spiral\Grpc\Client\Interceptor\Helper` 类提供了安全操作这些上下文字段的方法：
+
+```php
+use Spiral\Grpc\Client\Interceptor\Helper;
+use Spiral\Interceptors\Context\CallContextInterface;
+use Spiral\Interceptors\HandlerInterface;
+use Spiral\Interceptors\InterceptorInterface;
+
+final class AuthInterceptor implements InterceptorInterface
 {
     public function __construct(
-        private readonly RequestCore $core
-    ) {
-    }
+        private readonly string $authToken,
+    ) {}
 
-    public function ping(GRPC\ContextInterface $ctx, Pinger\PingRequest $in): Pinger\PingResponse
+    public function intercept(CallContextInterface $context, HandlerInterface $handler): mixed
     {
-        return $this->sendRequest(
-            '/' . self::NAME . '/ping',
-            $in,
-            $ctx,
-            Pinger\PingResponse::class
-        );
-    }
+        // 获取当前元数据
+        $metadata = Helper::getMetadata($context);
 
-    /**
-     * @template T of object
-     * @param non-empty-string $method
-     * @param class-string<T> $response
-     * @return T
-     */
-    public function sendRequest(
-        string $method,
-        \GRPC\Ping\PingRequest $in,
-        GRPC\ContextInterface $ctx,
-        string $response
-    ): object {
-        [$response, $status] = $this->core->callAction(
-            self::class, $method,
-            [
-                'responseClass' => $response,
-                'ctx' => $ctx,
-                'in' => $in,
-            ]
-        );
+        // 在元数据中添加认证令牌
+        $metadata['auth-token'] = [$this->authToken];
 
-        return $response;
+        // 用新元数据更新上下文
+        $context = Helper::withMetadata($context, $metadata);
+
+        // 继续请求流程
+        return $handler->handle($context);
     }
 }
 ```
 
-### 处理响应错误拦截器
+`Helper` 类提供以下方法：
+- `getConnections()`/`withConnections()` - 获取/设置可用连接
+- `getCurrentConnection()`/`withCurrentConnection()` - 获取/设置当前连接
+- `getMessage()`/`withMessage()` - 获取/设置请求消息
+- `getMetadata()`/`withMetadata()` - 获取/设置请求元数据
+- `getReturnType()`/`withReturnType()` - 获取/设置预期响应类型
+- `getOptions()`/`withOptions()` - 获取/设置请求选项
+
+### 自定义客户端拦截器示例：遥测
+
+以下是一个自定义客户端拦截器的示例，它将遥测数据注入到请求中：
 
 ```php
-namespace App\Service\Interceptor;
-
-use Spiral\Core\CoreInterceptorInterface;
-use Spiral\Core\CoreInterface;
-use Spiral\RoadRunner\GRPC;
-
-final class HandleResponseErrorsInterceptor implements CoreInterceptorInterface
-{
-    public function process(string $controller, string $action, array $parameters, CoreInterface $core): mixed
-    {
-        [$response, $status] = $core->callAction($controller, $action, $parameters);
-
-        $code = $status->code ?? GRPC\StatusCode::UNKNOWN;
-
-        if ($code !== GRPC\StatusCode::OK) {
-            throw new GRPC\Exception\GRPCException(
-                message: $status->details,
-                code: $status->code
-            );
-        }
-
-        return [$response, $code];
-    }
-}
-```
-
-### 将遥测跟踪 ID 传递到上下文
-
-```php
-namespace App\Service\Interceptor;
-
-use Psr\Container\ContainerInterface;
-use Spiral\Core\CoreInterceptorInterface;
-use Spiral\RoadRunner\GRPC\ContextInterface;
-use Spiral\RoadRunner\GRPC\ResponseHeaders;
+use Spiral\Grpc\Client\Interceptor\Helper;
+use Spiral\Interceptors\Context\CallContextInterface;
+use Spiral\Interceptors\HandlerInterface;
+use Spiral\Interceptors\InterceptorInterface;
 use Spiral\Telemetry\TraceKind;
 use Spiral\Telemetry\TracerInterface;
-use Spiral\Core\CoreInterface;
 
-class InjectTelemetryIntoContextInterceptor implements CoreInterceptorInterface
+final class TelemetryInterceptor implements InterceptorInterface
 {
     public function __construct(
-        private readonly ContainerInterface $container
-    ) {
-    }
+        private readonly TracerInterface $tracer,
+    ) {}
 
-    public function process(string $controller, string $action, array $parameters, CoreInterface $core): mixed
+    public function intercept(CallContextInterface $context, HandlerInterface $handler): mixed
     {
-        $tracer = $this->container->get(TracerInterface::class);
-        \assert($tracer instanceof TracerInterface);
+        // 获取当前元数据
+        $metadata = Helper::getMetadata($context);
 
-        if (isset($parameters['ctx']) and $parameters['ctx'] instanceof RequestContext) {
-            $metadata = $parameters['ctx']->getValue('metadata');
-            if(!\is_array($metadata)) {
-                $metadata = [];
-            }
-            
-            $metadata['telemetry-trace-id'] = $tracer->getContext();
-            $parameters['ctx'] = $parameters['ctx']->withValue('metadata', $metadata);
-        }
+        // 在元数据中添加跟踪上下文
+        $metadata['telemetry-trace-id'] = $this->tracer->getContext();
 
-        return $tracer->trace(
-            name: \sprintf('GRPC request %s', $action),
-            callback: static fn() => $core->callAction($controller, $action, $parameters),
-            attributes: compact('controller', 'action'),
-            traceKind: TraceKind::PRODUCER
+        // 用新元数据更新上下文
+        $context = Helper::withMetadata($context, $metadata);
+
+        // 跟踪 gRPC 调用
+        $target = $context->getTarget();
+
+        return $this->tracer->trace(
+            name: \sprintf('GRPC client request %s', (string) $target),
+            callback: static fn(): mixed => $handler->handle($context),
+            attributes: [
+                'target' => (string) $target,
+                'path' => $target->getPath(),
+            ],
+            traceKind: TraceKind::PRODUCER,
         );
     }
 }
+```
+
+### 拦截器顺序
+
+拦截器的顺序很重要。拦截器按照它们在配置中定义的顺序执行。
+例如：
+
+```php
+[
+    SetTimoutInterceptor::createConfig(10_000), // 10 秒全局超时
+    RetryInterceptor::createConfig(maxAttempts: 3), // 最多 3 次重试
+    SetTimoutInterceptor::createConfig(3_000), // 每次尝试 3 秒超时
+]
+```
+
+在此配置中：
+1. 为整个请求（包括所有重试）设置 10 秒的全局超时
+2. 重试拦截器将在需要时进行最多 3 次重试尝试
+3. 每个单独的尝试有 3 秒的超时
+
+`ExecuteServiceInterceptors` 拦截器通常应放在全局拦截器列表的最后，以确保特定于服务的拦截器在全局拦截器之后运行。
+
+### 配置客户端拦截器
+
+有关配置 gRPC 客户端及其拦截器的详细信息，请参阅 [客户端](./client.md) 文档。以下是一个基本示例：
+
+```php app/config/grpc.php
+use App\GRPC\Interceptor\TelemetryInterceptor;
+use Spiral\Grpc\Client\Config\GrpcClientConfig;
+use Spiral\Grpc\Client\Config\ServiceConfig;
+use Spiral\Grpc\Client\Config\ConnectionConfig;
+use Spiral\Grpc\Client\Interceptor\SetTimoutInterceptor;
+use Spiral\Grpc\Client\Interceptor\RetryInterceptor;
+use Spiral\Grpc\Client\Interceptor\ExecuteServiceInterceptors;
+
+return [
+    // ... 服务器配置 ...
+    
+    'client' => new GrpcClientConfig(
+        interceptors: [
+            // 全局拦截器
+            TelemetryInterceptor::class,
+            SetTimoutInterceptor::createConfig(5_000),
+            RetryInterceptor::createConfig(maximumAttempts: 3),
+            // 调用特定于服务的拦截器
+            ExecuteServiceInterceptors::class,
+        ],
+        services: [
+            new ServiceConfig(
+                connections: ConnectionConfig::createInsecure('localhost:9001'),
+                interfaces: [
+                    \GRPC\MyService\ServiceInterface::class,
+                ],
+                // 特定于服务的拦截器
+                interceptors: [
+                    SetTimoutInterceptor::createConfig(2_000), // 为此服务覆盖超时
+                ],
+            ),
+        ],
+    )
+];
 ```

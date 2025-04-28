@@ -1,124 +1,58 @@
-# GRPC — Client SDK
+# GRPC — Client
 
 In the previous part of this [article](./service.md), we showed you how to create a gRPC service `Pinger` in PHP with
-Spiral and `spiral/roadrunner-bridge` package. In this part, we will show you how to create a client service
-`Monitor` for communication with `Pinger` service.
+Spiral and `spiral/roadrunner-bridge` package. In this part, we will show you how to create a client for communication with gRPC services.
 
 ## PHP client
 
-By following these steps, you will be able to create a client SDK for the Pinger service that can be easily used in your
-PHP applications. This will make it easier to communicate with the service and integrate it into your codebase.
+The `spiral/roadrunner-bridge` package includes the `spiral/grpc-client` package by default, which provides a simple and efficient way to communicate with gRPC services.
 
 > **Note**
 > Here you can find the [installation instructions](./configuration.md) for the `grpc` PHP extension, `protoc` compiler
 > and the `protoc-gen-php-grpc` plugin.
 
-### 1. Generate PHP classes from the `.proto` file
+### 1. Generate PHP interfaces from the `.proto` file
 
-To create the client SDK, we will use the PHP classes generated from the `.proto` file in the
-[previous part](./service.md). You can easily generate these classes following the instructions in the previous part.
+To create the client, we need to generate interfaces from the `.proto` file. You can follow the instructions in the [previous part](./service.md) to generate these interfaces.
 
-### 2. Create a client class
+### 2. Configure the gRPC client
 
-We will create a class that implements the `generated/GRPC/PingerInterface` interface and provides a simple interface for
-calling the service's methods.
+After generating the interfaces, you need to configure the gRPC client in the `app/config/grpc.php` file. The configuration includes:
 
 ```php
-namespace App\Service;
+return [
+    // File 'app/config/grpc.php'
+    // ... other options ...
 
-use GRPC\Pinger;
-use Spiral\Core\CoreInterface;
-use Spiral\RoadRunner\GRPC;
-
-final class PingerClient implements Pinger\PingerInterface extends \Grpc\BaseStub
-{
-    public function ping(GRPC\ContextInterface $ctx, Pinger\PingRequest $in): Pinger\PingResponse
-    {
-        [$response, $status] = $this->_simpleRequest(
-            '/' . self::NAME . '/ping',
-            $in,
-            [Pinger\PingResponse::class, 'decode'],
-            (array) $ctx->getValue('metadata'),
-            (array) $ctx->getValue('options')
-        )->wait();
-
-        return $response;
-    }
-}
-```
-
-### 3. Register the client class in the container
-
-To use the client class in your application, you will need to register it in the container. You can do this in the
-Application bootloader:
-
-```php app/src/Application/Bootloader/AppBootloader.php
-namespace App\Application\Bootloader;
-
-use App\Service\PingerClient;
-use GRPC\Pinger\PingerInterface;
-use Spiral\Boot\Bootloader\Bootloader;
-use Spiral\Boot\EnvironmentInterface;
-
-final class AppBootloader extends Bootloader
-{
-    protected const SINGLETONS = [
-        PingerInterface::class => [self::class, 'initPingService'],
-    ];
-
-    private function initPingService(
-        EnvironmentInterface $env
-    ): PingerInterface {
-        return new PingerClient(
-            $env->get('PING_SERVICE_HOST', '127.0.0.1:9001'),
-            ['credentials' => \Grpc\ChannelCredentials::createInsecure()],
-        );
-    }
-}
-```
-
-And add the bootloader to the list of bootloaders:
-
-:::: tabs
-
-::: tab Using method
-
-```php app/src/Application/Kernel.php
-public function defineBootloaders(): array
-{
-    return [
-        // ...
-        \App\Application\Bootloader\AppBootloader::class,
-        // ...
-    ];
-}
-```
-
-Read more about bootloaders in the [Framework — Bootloaders](../framework/bootloaders.md) section.
-:::
-
-::: tab Using constant
-
-```php app/src/Application/Kernel.php
-protected const LOAD = [
-    // ...
-    \App\Application\Bootloader\AppBootloader::class,
-    // ...
+    'client' => new GrpcClientConfig(
+        interceptors: [
+            SetTimoutInterceptor::createConfig(6_000),
+            RetryInterceptor::createConfig(
+                maximumAttempts: 1,
+            ),
+            ExecuteServiceInterceptors::class,
+        ],
+        services: [
+            new \Spiral\Grpc\Client\Config\ServiceConfig(
+                connections: ConnectionConfig::createInsecure('localhost:9001'),
+                interfaces: [
+                    \GRPC\Pinger\PingerInterface::class,
+                ],
+            ),
+        ],
+    ),
 ];
 ```
 
-Read more about bootloaders in the [Framework — Bootloaders](../framework/bootloaders.md) section.
-:::
+In this configuration:
+- `interceptors` - global interceptors that will be applied to all gRPC client requests
+- `services` - list of gRPC services with their connection details and interfaces
 
-::::
+The `spiral/grpc-client` package will automatically generate proxy classes for the interfaces at runtime, so you don't need to implement them manually.
 
-Now the client class is registered as a singleton in the container.
+### 3. Client usage
 
-### 4. Client usage
-
-Finally, you can inject the client class into your code and use it to call the Pinger service.
-
-Here is an example of how you can use the `PingerClient`:
+You can now inject the gRPC client interface directly into your code and use it to call the service methods:
 
 ```php app/src/Endpoint/Console/PingServiceCommand.php
 namespace App\Endpoint\Console;
@@ -129,8 +63,8 @@ use Spiral\Console\Attribute\Question;
 use GRPC\Pinger\PingerInterface;
 use Spiral\Console\Command;
 use GRPC\Pinger\PingRequest;
+use Spiral\Grpc\Client\Exception\GrpcClientException;
 use Spiral\RoadRunner\GRPC\Context;
-use Spiral\RoadRunner\GRPC\Exception\GRPCException;
 
 #[AsCommand(name: 'ping')]
 final class PingCommand extends Command
@@ -140,30 +74,27 @@ final class PingCommand extends Command
     private string $url;
 
     public function __invoke(
-        PingerInterface $client
+        PingerInterface $client,
     ): int {
         try {
-
             $this->writeln(\sprintf('Sending ping request [%s]...', $this->url));
 
             $response = $client->ping(
                 new Context([]),
-                new PingRequest(['url' => $this->url])
+                new PingRequest(['url' => $this->url]),
             );
 
             $this->writeln(\sprintf(
                 'Response: code - %d',
-                $response->getStatusCode()
+                $response->getStatusCode(),
             ));
 
-        } catch (GRPCException $e) {
-
+        } catch (GrpcClientException $e) {
             $this->writeln(\sprintf(
                 'Error: code - %d, message - %s',
                 $e->getCode(),
-                $e->getMessage()
+                $e->getMessage(),
             ));
-
         }
 
         return self::SUCCESS;
@@ -179,10 +110,79 @@ php app.php ping https://google.com
 
 This will call the Pinger service and print the HTTP status code of the response.
 
+## Advanced Client Features
+
+The `spiral/grpc-client` package provides several advanced features to enhance your gRPC client implementation.
+
+### Interceptors
+
+Interceptors allow you to modify or extend the behavior of gRPC requests. The package includes several built-in interceptors:
+
+- `SetTimoutInterceptor` - sets a timeout for the gRPC request
+- `RetryInterceptor` - automatically retries failed requests
+- `ExecuteServiceInterceptors` - executes service-specific interceptors
+
+You can also create your own interceptors by implementing the `InterceptorInterface`:
+
+```php
+use Spiral\Core\InterceptorInterface;
+use Spiral\Core\CoreInterceptorInterface;
+
+final class AuthContextInterceptor implements InterceptorInterface
+{
+    public function __construct(
+        private readonly AuthContextInterface $authContext,
+    ) {}
+
+    public function intercept(CallContextInterface $context, HandlerInterface $handler): mixed
+    {
+        $token = $this->authContext->getToken();
+
+        if ($token === null) {
+            return $handler->handle($context);
+        }
+
+        $metadata = \Spiral\Grpc\Client\Interceptor\Helper::withMetadata($context);
+        $metadata['auth-token'] = [$token];
+
+        return $handler->handle(\Spiral\Grpc\Client\Interceptor\Helper::withMetadata($context, $metadata));
+    }
+}
+```
+
+### Multiple Connections
+
+You can configure multiple connections to a service for load balancing or failover:
+
+```php
+new ServiceConfig(
+    connections: [
+        ConnectionConfig::createInsecure('service-1:9001'),
+        ConnectionConfig::createInsecure('service-2:9001'),
+    ],
+    interfaces: [
+        \GRPC\Pinger\PingerInterface::class,
+    ],
+)
+```
+
+### Secure Connections
+
+To create a secure connection, use the `TlsConfig` class:
+
+```php
+new ConnectionConfig(
+    address: 'secure-service:9001',
+    tls: new TlsConfig(
+        privateKey: '/my-project.key',
+        certChain: '/my-project.pem',
+    ),
+),
+```
+
 ## Golang Clients
 
-GRPC allows you to create a client SDK in any supported language. To generate client on Golang, install the GRPC toolkit
-first:
+GRPC allows you to create a client SDK in any supported language. To generate a client in Golang, install the GRPC toolkit first:
 
 ### 1. Install the necessary dependencies
 
